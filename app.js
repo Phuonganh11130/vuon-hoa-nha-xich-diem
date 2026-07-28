@@ -63,6 +63,15 @@ function getEffectiveFlowerIds(member){
   return member.baseFlowerIds;
 }
 
+/* Cột ID_Acc trên Supabase là kiểu int, trong khi JS luôn giữ idAcc dạng string
+   (để dùng làm object key/route). Mọi lệnh gửi lên Supabase (.eq, insert) phải
+   convert qua Number() ở đây, nếu không PostgREST sẽ không khớp được dòng nào
+   mà không báo lỗi rõ ràng. */
+function toIdAccNum(idAcc){
+  const n = Number(idAcc);
+  return Number.isFinite(n) ? n : null;
+}
+
 /* rebuild ownersByFlower / flowersByMember từ state.members hiện tại.
    Gọi lại sau khi load data và sau mỗi lần ghi Supabase thành công. */
 function computeRelationships(){
@@ -472,7 +481,7 @@ function wireAddFlower(){
       const { error: updErr } = await supabaseClient
         .from('members')
         .update({ ID_Hoa_So_Huu: idsArr.join(',') })
-        .eq('ID_Acc', m.idAcc);
+        .eq('ID_Acc', toIdAccNum(m.idAcc));
       if(updErr){
         console.error(updErr);
         continue; // hoa đã lưu thành công; chủ sở hữu này có thể gán lại thủ công sau
@@ -730,7 +739,7 @@ function wireAddMember(){
 
     const { error: insertErr } = await supabaseClient
       .from('members')
-      .insert([{ ID_Acc: idAcc, 'Tên Game': name, Zalo: zalo, ID_Hoa_So_Huu: flowerIds.join(',') }]);
+      .insert([{ ID_Acc: toIdAccNum(idAcc), 'Tên Game': name, Zalo: zalo, ID_Hoa_So_Huu: flowerIds.join(',') }]);
 
     if(insertErr){
       console.error(insertErr);
@@ -1031,7 +1040,7 @@ function wireMemberInfoEdit(m){
     const { error } = await supabaseClient
       .from('members')
       .update({ 'Tên Game': name, Zalo: zalo })
-      .eq('ID_Acc', m.idAcc);
+      .eq('ID_Acc', toIdAccNum(m.idAcc));
 
     if(error){
       console.error(error);
@@ -1113,7 +1122,7 @@ function wireMemberEdit(m){
     const { error } = await supabaseClient
       .from('members')
       .update({ ID_Hoa_So_Huu: flowerIds.join(',') })
-      .eq('ID_Acc', m.idAcc);
+      .eq('ID_Acc', toIdAccNum(m.idAcc));
 
     if(error){
       console.error(error);
