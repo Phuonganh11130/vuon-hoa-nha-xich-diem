@@ -131,16 +131,14 @@ async function loadData(){
   state.flowerById = Object.fromEntries(state.flowers.map(f => [f.id, f]));
   state.memberByKey = Object.fromEntries(state.members.map(m => [m.key, m]));
 
-  // sở hữu gốc — hợp của tham chiếu theo ID (ID_Hoa_So_Huu) và theo tên (List Acc).
-  const baseSets = {};
-  state.members.forEach(m => baseSets[m.key] = new Set(m.rawFlowerIds.filter(id => state.flowerById[id])));
-  state.flowers.forEach(f => {
-    f.listAccNames.forEach(nm => {
-      const match = state.members.find(m => m.name.toLowerCase() === nm.toLowerCase());
-      if(match) baseSets[match.key].add(f.id);
-    });
+  // Sở hữu gốc — CHỈ dựa vào cột ID_Hoa_So_Huu (đây là nguồn duy nhất mà giao diện ghi vào).
+  // Trước đây có gộp thêm theo tên trong cột "List Acc" của flowers, nhưng cột đó không được
+  // đồng bộ khi sửa qua giao diện, nên hoa đã gỡ khỏi ID_Hoa_So_Huu sẽ bị "hồi sinh" lại mỗi lần
+  // tải trang nếu tên thành viên còn nằm trong List Acc. Cột List Acc vẫn giữ trên Supabase để
+  // tham khảo/tìm kiếm (xem paintFlowerGrid), chỉ không dùng để tính sở hữu nữa.
+  state.members.forEach(m => {
+    m.baseFlowerIds = m.rawFlowerIds.filter(id => state.flowerById[id]);
   });
-  state.members.forEach(m => { m.baseFlowerIds = Array.from(baseSets[m.key]); });
 
   state.avatars = loadAvatars();
   computeRelationships();
