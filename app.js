@@ -31,73 +31,23 @@ function nextMemberIdAcc(){
   return String(maxNum + 1);
 }
 
-const OVERRIDES_KEY = 'hoaSoHuu_overrides_v1';
-const NEW_FLOWERS_KEY = 'hoaSoHuu_newFlowers_v1';
-const NEW_MEMBERS_KEY = 'hoaSoHuu_newMembers_v1';
-const MEMBER_INFO_KEY = 'hoaSoHuu_memberInfo_v1';
+/* ---------------- local-only persistence ----------------
+   Sau refactor, Supabase là nguồn dữ liệu duy nhất cho flowers/members/quan hệ sở hữu.
+   CHỈ avatar (ảnh đại diện) vẫn lưu localStorage riêng theo từng máy — theo yêu cầu,
+   phần này chưa cần đồng bộ đa thiết bị. */
 const AVATARS_KEY = 'hoaSoHuu_avatars_v1';
 
 const state = {
   flowers: [],      // [{id,name,tier,status,listAccNames:[],image}]
-  members: [],      // [{key,idAcc,name,zalo,baseFlowerIds:[]}]
-  overrides: {},       // memberKey -> [flowerId,...] — edits made in-browser, wins over base data
-  customFlowers: [],   // flowers added in-browser (not from CSV) — persisted locally
-  customMembers: [],   // members added in-browser (not from CSV) — persisted locally
-  memberInfoOverrides: {}, // memberKey -> {name,zalo,idAcc} — manual edits to a member's basic info
-  avatars: {},         // memberKey -> avatar image data URL
-  ownersByFlower: {},  // flowerId -> [memberKey,...]  (computed: base ⊕ overrides)
-  flowersByMember: {}, // memberKey -> [flowerId,...]  (computed: base ⊕ overrides)
+  members: [],      // [{key,idAcc,name,zalo,baseFlowerIds:[]}]  — key = idAcc (khóa cố định)
+  avatars: {},          // memberKey -> avatar image data URL (chỉ lưu local, xem ghi chú trên)
+  ownersByFlower: {},   // flowerId -> [memberKey,...]  (tính từ baseFlowerIds)
+  flowersByMember: {},  // memberKey -> [flowerId,...]  (tính từ baseFlowerIds)
   flowerById: {},
   memberByKey: {},
   loaded: false,
 };
 
-function loadOverrides(){
-  try{
-    const raw = localStorage.getItem(OVERRIDES_KEY);
-    return raw ? JSON.parse(raw) : {};
-  }catch(e){ return {}; }
-}
-function saveOverrides(){
-  try{ localStorage.setItem(OVERRIDES_KEY, JSON.stringify(state.overrides)); }
-  catch(e){ /* storage unavailable — edits stay in-memory for this session only */ }
-}
-function loadCustomFlowers(){
-  try{
-    const raw = localStorage.getItem(NEW_FLOWERS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  }catch(e){ return []; }
-}
-function saveCustomFlowers(){
-  try{ localStorage.setItem(NEW_FLOWERS_KEY, JSON.stringify(state.customFlowers)); }
-  catch(e){ /* storage unavailable — edits stay in-memory for this session only */ }
-}
-function isCustomFlower(flowerId){
-  return state.customFlowers.some(f => f.id === flowerId);
-}
-function loadCustomMembers(){
-  try{
-    const raw = localStorage.getItem(NEW_MEMBERS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  }catch(e){ return []; }
-}
-function saveCustomMembers(){
-  try{ localStorage.setItem(NEW_MEMBERS_KEY, JSON.stringify(state.customMembers)); }
-  catch(e){ /* storage unavailable — edits stay in-memory for this session only */ }
-}
-function isCustomMember(memberKey){
-  return state.customMembers.some(m => m.key === memberKey);
-}
-function loadMemberInfoOverrides(){
-  try{
-    const raw = localStorage.getItem(MEMBER_INFO_KEY);
-    return raw ? JSON.parse(raw) : {};
-  }catch(e){ return {}; }
-}
-function saveMemberInfoOverrides(){
-  try{ localStorage.setItem(MEMBER_INFO_KEY, JSON.stringify(state.memberInfoOverrides)); }
-  catch(e){ /* storage unavailable — edits stay in-memory for this session only */ }
-}
 function loadAvatars(){
   try{
     const raw = localStorage.getItem(AVATARS_KEY);
@@ -106,22 +56,15 @@ function loadAvatars(){
 }
 function saveAvatars(){
   try{ localStorage.setItem(AVATARS_KEY, JSON.stringify(state.avatars)); }
-  catch(e){ /* storage unavailable — edits stay in-memory for this session only */ }
-}
-function makeMemberKey(){
-  return 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-}
-function getEffectiveFlowerIds(member){
-  return Object.prototype.hasOwnProperty.call(state.overrides, member.key)
-    ? state.overrides[member.key]
-    : member.baseFlowerIds;
-}
-function hasOverride(memberKey){
-  return Object.prototype.hasOwnProperty.call(state.overrides, memberKey);
+  catch(e){ /* storage unavailable — avatar chỉ tồn tại trong phiên này */ }
 }
 
-/* rebuild ownersByFlower / flowersByMember from current members + overrides.
-   Call after loading data and after every edit/save/reset. */
+function getEffectiveFlowerIds(member){
+  return member.baseFlowerIds;
+}
+
+/* rebuild ownersByFlower / flowersByMember từ state.members hiện tại.
+   Gọi lại sau khi load data và sau mỗi lần ghi Supabase thành công. */
 function computeRelationships(){
   const ownersByFlower = {};
   const flowersByMember = {};
@@ -133,58 +76,6 @@ function computeRelationships(){
   });
   state.ownersByFlower = ownersByFlower;
   state.flowersByMember = flowersByMember;
-}
-
-/* ---------------- CSV loading (tiny dependency-free RFC4180 parser) ---------------- */
-function parseCSVText(text){
-  // Handles quoted fields, escaped "" quotes, commas/newlines inside quotes, CRLF/LF.
-  const rows = [];
-  let row = [];
-  let field = '';
-  let inQuotes = false;
-  if(text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // strip BOM
-
-  for(let i = 0; i < text.length; i++){
-    const c = text[i];
-    if(inQuotes){
-      if(c === '"'){
-        if(text[i+1] === '"'){ field += '"'; i++; }
-        else{ inQuotes = false; }
-      } else {
-        field += c;
-      }
-    } else {
-      if(c === '"'){
-        inQuotes = true;
-      } else if(c === ','){
-        row.push(field); field = '';
-      } else if(c === '\r'){
-        // skip, \n follows
-      } else if(c === '\n'){
-        row.push(field); field = '';
-        rows.push(row); row = [];
-      } else {
-        field += c;
-      }
-    }
-  }
-  if(field.length || row.length){ row.push(field); rows.push(row); }
-
-  const filtered = rows.filter(r => !(r.length === 1 && r[0] === ''));
-  if(!filtered.length) return [];
-  const headers = filtered[0].map(h => h.trim());
-  return filtered.slice(1).map(r => {
-    const obj = {};
-    headers.forEach((h, idx) => obj[h] = (r[idx] ?? '').trim());
-    return obj;
-  });
-}
-
-async function parseCSV(url){
-  const res = await fetch(url);
-  if(!res.ok) throw new Error(`Không tải được ${url} (HTTP ${res.status})`);
-  const text = await res.text();
-  return parseCSVText(text);
 }
 
 function splitList(str){
@@ -200,39 +91,24 @@ async function loadData(){
     supabaseClient.from("flowers").select("*"),
     supabaseClient.from("members").select("*")
   ]);
-  console.log("Flowers:", flowerRows);
-  console.log("Flower Error:", flowerError);
-
-  console.log("Members:", memberRows);
-  console.log("Member Error:", memberError);
 
   if (flowerError) throw flowerError;
   if (memberError) throw memberError;
 
-  state.members = memberRows.map((row, idx) => ({
-    key: String(idx),
-    idAcc: String(row['ID_Acc'] ?? '').trim(),
-    name: String(row['Tên Game'] ?? '').trim(),
-    zalo: String(row['Zalo'] ?? '').trim(),
-    rawFlowerIds: splitList(String(row['ID_Hoa_So_Huu'] ?? '')),
-    baseFlowerIds: [],
-  })).filter(m => m.name);
-
-  // fold in members added locally through "➕ Thêm thành viên" (persisted in this browser)
-  state.customMembers = loadCustomMembers();
-  const csvMemberKeys = new Set(state.members.map(m => m.key));
-  state.customMembers.forEach(m => {
-    if(!csvMemberKeys.has(m.key)){
-      state.members.push({
-        key: m.key,
-        idAcc: m.idAcc || '',
-        name: m.name || '',
-        zalo: m.zalo || '',
-        rawFlowerIds: (m.rawFlowerIds||[]).slice(),
-        baseFlowerIds: [],
-      });
-    }
-  });
+  // key = ID_Acc: đây là khóa định danh CỐ ĐỊNH, khớp với các lệnh .eq("ID_Acc", ...)
+  // dùng để update Supabase ở các nơi khác trong file. Vì vậy ID_Acc không cho sửa
+  // trong màn "Sửa thông tin thành viên" (xem memberInfoEditShell).
+  state.members = memberRows.map(row => {
+    const idAcc = String(row['ID_Acc'] ?? '').trim();
+    return {
+      key: idAcc,
+      idAcc,
+      name: String(row['Tên Game'] ?? '').trim(),
+      zalo: String(row['Zalo'] ?? '').trim(),
+      rawFlowerIds: splitList(String(row['ID_Hoa_So_Huu'] ?? '')),
+      baseFlowerIds: [],
+    };
+  }).filter(m => m.name && m.key);
 
   state.flowers = flowerRows.map(row => ({
     id: (row['ID_Hoa']||'').trim(),
@@ -243,19 +119,10 @@ async function loadData(){
     status: (row['Trạng Thái']||'').trim(),
   })).filter(f => f.id);
 
-  // fold in flowers added locally through "➕ Thêm hoa mới" (persisted in this browser)
-  state.customFlowers = loadCustomFlowers();
-  const csvIds = new Set(state.flowers.map(f => f.id));
-  state.customFlowers.forEach(f => {
-    if(!csvIds.has(f.id)) state.flowers.push(f);
-  });
-
   state.flowerById = Object.fromEntries(state.flowers.map(f => [f.id, f]));
   state.memberByKey = Object.fromEntries(state.members.map(m => [m.key, m]));
 
-  // base ownership — union of ID-based (ID_Hoa_So_Huu) and name-based (List Acc) references.
-  // NOTE: this matches against each member's ORIGINAL name, before any manual info edits are
-  // applied below — otherwise renaming a member would silently break the CSV's "List Acc" links.
+  // sở hữu gốc — hợp của tham chiếu theo ID (ID_Hoa_So_Huu) và theo tên (List Acc).
   const baseSets = {};
   state.members.forEach(m => baseSets[m.key] = new Set(m.rawFlowerIds.filter(id => state.flowerById[id])));
   state.flowers.forEach(f => {
@@ -266,19 +133,7 @@ async function loadData(){
   });
   state.members.forEach(m => { m.baseFlowerIds = Array.from(baseSets[m.key]); });
 
-  // apply manual edits to a member's basic info ("🧑‍💼 Sửa thông tin thành viên"), persisted locally
-  state.memberInfoOverrides = loadMemberInfoOverrides();
-  state.members.forEach(m => {
-    const ov = state.memberInfoOverrides[m.key];
-    if(ov){
-      if(ov.name) m.name = ov.name;
-      if(ov.zalo !== undefined) m.zalo = ov.zalo;
-      if(ov.idAcc !== undefined) m.idAcc = ov.idAcc;
-    }
-  });
-
   state.avatars = loadAvatars();
-  state.overrides = loadOverrides();
   computeRelationships();
 
   state.loaded = true;
@@ -305,14 +160,13 @@ function tierColor(tier){
   return (TIER_META[tier] && TIER_META[tier].color) || 'var(--ink-faint)';
 }
 function flowerMediaInner(f){
-  const src = f.image;
   return '🌸';
 }
 
 /* ---------------- routing ---------------- */
 function currentRoute(){
   const hash = location.hash.replace(/^#/,'') || '/hoa';
-  const parts = hash.split('/').filter(Boolean); // e.g. ['hoa'] or ['hoa','Do001']
+  const parts = hash.split('/').filter(Boolean);
   return parts;
 }
 
@@ -355,8 +209,7 @@ async function render(){
 
 /* ---------------- Flower list page ---------------- */
 let flowerFilters = { q:'', tier:'', status:'', sort:'id-asc' };
-// addFlowerState is non-null only while actively adding a new flower.
-let addFlowerState = null; // { id, name, tier, status, search:'', selected:Set<memberKey>, error:'' }
+let addFlowerState = null; // { name, tier, status, search:'', selected:Set<memberKey>, error:'' }
 
 function renderFlowerList(){
   const app = document.getElementById('app');
@@ -504,7 +357,7 @@ function paintFlowerGrid(){
   }).join('');
 }
 
-/* ---------------- Add new flower (mirrors member "Cập nhật hoa sở hữu" editor) ---------------- */
+/* ---------------- Add new flower ---------------- */
 function addFlowerShell(){
   const s = addFlowerState;
   return `
@@ -568,14 +421,14 @@ function wireAddFlower(){
   document.getElementById('newFlowerName').addEventListener('input', e => { addFlowerState.name = e.target.value; });
   document.getElementById('newFlowerTier').addEventListener('change', e => {
     addFlowerState.tier = e.target.value;
-    renderFlowerList(); // re-render so the auto-generated ID preview updates
+    renderFlowerList();
   });
   document.getElementById('newFlowerStatus').addEventListener('change', e => { addFlowerState.status = e.target.value; });
   document.getElementById('newFlowerMemberSearch').addEventListener('input', e => {
     addFlowerState.search = e.target.value; paintNewFlowerMemberChecklist();
   });
 
-  document.getElementById('btnSaveNewFlower').addEventListener('click', () => {
+  document.getElementById('btnSaveNewFlower').addEventListener('click', async () => {
     const name = addFlowerState.name.trim();
     const tier = document.getElementById('newFlowerTier').value;
     const status = document.getElementById('newFlowerStatus').value;
@@ -592,28 +445,45 @@ function wireAddFlower(){
     }
 
     let id = nextFlowerId(tier);
-    // safety net in the unlikely event two additions race for the same number
     while(state.flowerById[id]){
       const m = id.match(/^(.*?)(\d+)$/);
       id = m ? m[1] + String(parseInt(m[2],10)+1).padStart(m[2].length,'0') : id + 'X';
     }
 
+    const saveBtn = document.getElementById('btnSaveNewFlower');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Đang lưu…';
+
+    const { error: insertErr } = await supabaseClient
+      .from('flowers')
+      .insert([{ ID_Hoa: id, Name: name, flower_color: tier, 'Trạng Thái': status, Image: '', 'List Acc': '' }]);
+
+    if(insertErr){
+      console.error(insertErr);
+      addFlowerState.error = 'Lưu hoa thất bại: ' + (insertErr.message || '');
+      renderFlowerList();
+      return;
+    }
+
+    // gán chủ sở hữu đã chọn — cập nhật thẳng cột ID_Hoa_So_Huu của từng thành viên trên Supabase
+    const selectedMembers = Array.from(addFlowerState.selected).map(k => state.memberByKey[k]).filter(Boolean);
+    for(const m of selectedMembers){
+      const idsArr = Array.from(new Set([...m.baseFlowerIds, id]));
+      const { error: updErr } = await supabaseClient
+        .from('members')
+        .update({ ID_Hoa_So_Huu: idsArr.join(',') })
+        .eq('ID_Acc', m.idAcc);
+      if(updErr){
+        console.error(updErr);
+        continue; // hoa đã lưu thành công; chủ sở hữu này có thể gán lại thủ công sau
+      }
+      m.rawFlowerIds = idsArr;
+      m.baseFlowerIds = idsArr;
+    }
+
     const newFlower = { id, name, tier, status, listAccNames:[], image:'' };
     state.flowers.push(newFlower);
     state.flowerById[id] = newFlower;
-    state.customFlowers.push(newFlower);
-    saveCustomFlowers();
-
-    // assign selected members as owners, reusing the same overrides mechanism
-    // used by the member "Cập nhật hoa sở hữu" editor.
-    addFlowerState.selected.forEach(memberKey => {
-      const m = state.memberByKey[memberKey];
-      if(!m) return;
-      const ids = new Set(getEffectiveFlowerIds(m));
-      ids.add(id);
-      state.overrides[memberKey] = Array.from(ids);
-    });
-    if(addFlowerState.selected.size) saveOverrides();
 
     computeRelationships();
     addFlowerState = null;
@@ -712,7 +582,6 @@ function renderFlowerDetail(id){
 
 /* ---------------- Member list page ---------------- */
 let memberFilters = { q:'', sort:'name-asc' };
-// addMemberState is non-null only while actively creating a new member.
 let addMemberState = null; // { name, zalo, idAcc, avatarDataUrl, search:'', tier:'', selected:Set<flowerId>, error:'' }
 
 function renderMemberList(){
@@ -725,7 +594,6 @@ function renderMemberList(){
     return;
   }
 
-  const editedCount = state.members.filter(m => hasOverride(m.key)).length;
   app.innerHTML = `
     <div class="scroll-banner">Thành Viên</div>
     <div class="toolbar">
@@ -744,7 +612,7 @@ function renderMemberList(){
       </div>
       <div class="result-count" id="mCount"></div>
       <button class="btn-export" id="btnAddMember" title="Thêm một thành viên mới vào danh sách">➕ Thêm thành viên</button>
-      <button class="btn-export" id="btnExportCSV" title="Tải file Thành_Viên.csv với dữ liệu hoa sở hữu đã cập nhật">⬇️ Xuất file cập nhật${editedCount ? ` (${editedCount})` : ''}</button>
+      <button class="btn-export" id="btnExportCSV" title="Tải file Thành_Viên.csv theo dữ liệu hiện tại">⬇️ Xuất file CSV</button>
     </div>
     <div class="member-grid" id="memberGrid"></div>
   `;
@@ -760,7 +628,7 @@ function renderMemberList(){
   paintMemberGrid();
 }
 
-/* ---------------- Add new member (mirrors the flower ownership editor) ---------------- */
+/* ---------------- Add new member ---------------- */
 function addMemberShell(){
   const s = addMemberState;
   return `
@@ -845,23 +713,37 @@ function wireAddMember(){
     });
   });
 
-  document.getElementById('btnSaveNewMember').addEventListener('click', () => {
+  document.getElementById('btnSaveNewMember').addEventListener('click', async () => {
     const name = addMemberState.name.trim();
     if(!name){
       addMemberState.error = 'Vui lòng nhập tên trong game.';
       renderMemberList();
       return;
     }
-    const key = makeMemberKey();
     const zalo = addMemberState.zalo.trim();
     const idAcc = addMemberState.idAcc.trim();
     const flowerIds = Array.from(addMemberState.selected);
 
+    const saveBtn = document.getElementById('btnSaveNewMember');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Đang lưu…';
+
+    const { error: insertErr } = await supabaseClient
+      .from('members')
+      .insert([{ ID_Acc: idAcc, 'Tên Game': name, Zalo: zalo, ID_Hoa_So_Huu: flowerIds.join(',') }]);
+
+    if(insertErr){
+      console.error(insertErr);
+      // lỗi phổ biến nhất ở đây là ID_Acc bị trùng do 2 người thêm gần như cùng lúc
+      addMemberState.error = 'Lưu thành viên thất bại (có thể ID_Acc bị trùng, thử lại): ' + (insertErr.message || '');
+      renderMemberList();
+      return;
+    }
+
+    const key = idAcc;
     const newMember = { key, idAcc, name, zalo, rawFlowerIds: flowerIds, baseFlowerIds: flowerIds.slice() };
     state.members.push(newMember);
     state.memberByKey[key] = newMember;
-    state.customMembers.push({ key, idAcc, name, zalo, rawFlowerIds: flowerIds });
-    saveCustomMembers();
 
     if(addMemberState.avatarDataUrl){
       state.avatars[key] = addMemberState.avatarDataUrl;
@@ -912,8 +794,7 @@ function paintAddMemberChecklist(){
   });
 }
 
-/* Builds an updated Thành_Viên.csv (same columns) reflecting any in-browser edits,
-   and triggers a download so it can replace data/members.csv permanently. */
+/* xuất Thành_Viên.csv theo dữ liệu Supabase hiện tại (bản sao lưu/tham khảo, không phải nguồn dữ liệu) */
 function csvField(str){
   const s = String(str ?? '');
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
@@ -929,7 +810,7 @@ function exportMembersCSV(){
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'Thanh_Vien_cap_nhat.csv';
+  a.download = 'Thanh_Vien.csv';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -962,7 +843,7 @@ function paintMemberGrid(){
     <a class="member-card" href="#/thanhvien/${m.key}" data-link>
       ${avatarHTML(m)}
       <span class="member-info">
-        <div class="member-name">${esc(m.name)} ${hasOverride(m.key) ? '<span class="mini-edited" title="Đã chỉnh sửa thủ công">✎</span>' : ''} ${isCustomMember(m.key) ? '<span class="edited-badge" title="Thành viên mới thêm">🆕 mới</span>' : ''}</div>
+        <div class="member-name">${esc(m.name)}</div>
         <div class="member-zalo">${m.zalo ? 'Zalo: ' + esc(m.zalo) : '—'}</div>
       </span>
       <span class="member-badge">🌸 ${fc(m)}</span>
@@ -971,10 +852,8 @@ function paintMemberGrid(){
 }
 
 /* ---------------- Member detail page (view + edit) ---------------- */
-// editState is non-null only while actively editing one member's owned flowers.
 let editState = null; // { memberKey, search:'', tier:'', selected:Set<flowerId> }
-// editInfoState is non-null only while actively editing one member's basic info/avatar.
-let editInfoState = null; // { memberKey, name, zalo, idAcc, avatarDataUrl, avatarRemoved, error }
+let editInfoState = null; // { memberKey, name, zalo, avatarDataUrl, avatarRemoved, error }
 
 function renderMemberDetail(key){
   const app = document.getElementById('app');
@@ -1002,7 +881,6 @@ function renderMemberDetail(key){
   const flowerIds = state.flowersByMember[key] || [];
   const flowers = flowerIds.map(id => state.flowerById[id]).filter(Boolean);
   flowers.sort((a,b)=>a.name.localeCompare(b.name,'vi'));
-  const edited = hasOverride(key);
 
   app.innerHTML = `
     <div class="detail-wrap">
@@ -1022,7 +900,6 @@ function renderMemberDetail(key){
         <div class="flower-mini-list">
           <div class="owners-title-row">
             <span class="owners-title">Hoa sở hữu (${flowers.length})</span>
-            ${edited ? `<span class="edited-badge">✎ đã chỉnh sửa thủ công</span>` : ''}
           </div>
           ${flowers.length ? flowers.map(f => {
             const color = tierColor(f.tier);
@@ -1051,7 +928,6 @@ function renderMemberDetail(key){
       memberKey: key,
       name: m.name,
       zalo: m.zalo,
-      idAcc: m.idAcc,
       avatarDataUrl: state.avatars[key] || '',
       avatarRemoved: false,
       error: '',
@@ -1073,7 +949,7 @@ function memberInfoEditShell(m){
             : `<span class="avatar" id="infoAvatarPreview">${esc(initials(s.name || m.name))}</span>`}
           <div>
             <h1>Sửa thông tin thành viên</h1>
-            <div class="sub">Cập nhật tên, Zalo, ID_Acc và ảnh đại diện</div>
+            <div class="sub">Cập nhật tên, Zalo và ảnh đại diện</div>
           </div>
         </div>
         <div class="edit-toolbar" style="flex-wrap:wrap;">
@@ -1086,8 +962,8 @@ function memberInfoEditShell(m){
             <input id="infoZalo" type="text" value="${esc(s.zalo)}">
           </div>
           <div class="select-field">
-            <label>ID_Acc</label>
-            <input id="infoIdAcc" type="text" value="${esc(s.idAcc)}">
+            <label>ID_Acc — không thể thay đổi</label>
+            <input id="infoIdAcc" type="text" value="${esc(m.idAcc)}" disabled>
           </div>
         </div>
         <div class="edit-toolbar" style="flex-wrap:wrap;">
@@ -1111,7 +987,7 @@ function wireMemberInfoEdit(m){
   const s = editInfoState;
   document.getElementById('infoName').addEventListener('input', e => { s.name = e.target.value; });
   document.getElementById('infoZalo').addEventListener('input', e => { s.zalo = e.target.value; });
-  document.getElementById('infoIdAcc').addEventListener('input', e => { s.idAcc = e.target.value; });
+  // ID_Acc bị vô hiệu hóa — đây là khóa định danh cố định dùng để đồng bộ Supabase, không cho sửa.
 
   document.getElementById('infoAvatarFile').addEventListener('change', e => {
     const file = e.target.files && e.target.files[0];
@@ -1139,18 +1015,33 @@ function wireMemberInfoEdit(m){
     renderMemberDetail(m.key);
   });
 
-  document.getElementById('btnSaveInfo').addEventListener('click', () => {
+  document.getElementById('btnSaveInfo').addEventListener('click', async () => {
     const name = s.name.trim();
     if(!name){
       s.error = 'Vui lòng nhập tên trong game.';
       renderMemberDetail(m.key);
       return;
     }
+    const zalo = s.zalo.trim();
+
+    const saveBtn = document.getElementById('btnSaveInfo');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Đang lưu…';
+
+    const { error } = await supabaseClient
+      .from('members')
+      .update({ 'Tên Game': name, Zalo: zalo })
+      .eq('ID_Acc', m.idAcc);
+
+    if(error){
+      console.error(error);
+      s.error = 'Lưu thất bại: ' + (error.message || '');
+      renderMemberDetail(m.key);
+      return;
+    }
+
     m.name = name;
-    m.zalo = s.zalo.trim();
-    m.idAcc = s.idAcc.trim();
-    state.memberInfoOverrides[m.key] = { name: m.name, zalo: m.zalo, idAcc: m.idAcc };
-    saveMemberInfoOverrides();
+    m.zalo = zalo;
 
     if(s.avatarRemoved){
       delete state.avatars[m.key];
@@ -1191,7 +1082,6 @@ function memberEditShell(m){
         <div class="edit-actions">
           <button class="btn-primary" id="btnSaveEdit">💾 Lưu thay đổi</button>
           <button class="btn-ghost" id="btnCancelEdit">Hủy</button>
-          <button class="btn-ghost btn-danger" id="btnResetEdit">↺ Khôi phục theo dữ liệu CSV gốc</button>
         </div>
       </div>
     </div>
@@ -1213,21 +1103,34 @@ function wireMemberEdit(m){
       c.style.background = active ? c.style.getPropertyValue('--c') : '';
     });
   });
-  document.getElementById('btnSaveEdit').addEventListener('click', () => {
-    state.overrides[m.key] = Array.from(editState.selected);
-    saveOverrides();
+  document.getElementById('btnSaveEdit').addEventListener('click', async () => {
+    const flowerIds = Array.from(editState.selected);
+
+    const saveBtn = document.getElementById('btnSaveEdit');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Đang lưu…';
+
+    const { error } = await supabaseClient
+      .from('members')
+      .update({ ID_Hoa_So_Huu: flowerIds.join(',') })
+      .eq('ID_Acc', m.idAcc);
+
+    if(error){
+      console.error(error);
+      alert('Lưu thất bại: ' + (error.message || ''));
+      saveBtn.disabled = false;
+      saveBtn.textContent = '💾 Lưu thay đổi';
+      return;
+    }
+
+    m.rawFlowerIds = flowerIds;
+    m.baseFlowerIds = flowerIds;
+
     computeRelationships();
     editState = null;
     renderMemberDetail(m.key);
   });
   document.getElementById('btnCancelEdit').addEventListener('click', () => {
-    editState = null;
-    renderMemberDetail(m.key);
-  });
-  document.getElementById('btnResetEdit').addEventListener('click', () => {
-    delete state.overrides[m.key];
-    saveOverrides();
-    computeRelationships();
     editState = null;
     renderMemberDetail(m.key);
   });
