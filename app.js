@@ -1169,7 +1169,7 @@ function wireMemberInfoEdit(m){
       // updated_at không khớp — có người khác đã sửa thành viên này trong lúc mình đang thao tác.
       // Giữ nguyên tên/Zalo đang gõ trong form (không renderMemberDetail thoát ra), chỉ làm mới
       // "mốc" updated_at để bấm Lưu lại được, không bắt gõ lại từ đầu.
-      alert('⚠️ Ai đó vừa cập nhật hoa sở hữu của thành viên này trong lúc bạn đang sửa.\n Nội dung đang nhập vẫn chưa được lưu, hãy lưu lại lần nữa.');
+      alert('⚠️ Ai đó đang sửa thông tin của thành viên này.\n Nội dung đang nhập vẫn chưa được lưu, hãy lưu lại lần nữa.');
       try{
         const { data: freshRow } = await supabaseClient
           .from('members')
