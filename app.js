@@ -995,10 +995,11 @@ function renderMemberDetail(key){
     btn.textContent = 'Đang tải…';
     // Trang có thể đã mở từ lâu — tải lại đúng dữ liệu mới nhất của riêng thành viên này
     // trước khi cho sửa, để không vô tình ghi đè lên thay đổi mới hơn của người khác.
+    let capturedUpdatedAt = null;
     try{
       const { data, error } = await supabaseClient
         .from('members')
-        .select('ID_Hoa_So_Huu')
+        .select('ID_Hoa_So_Huu, updated_at')
         .eq('ID_Acc', toIdAccNum(m.idAcc))
         .single();
       if(!error && data){
@@ -1006,12 +1007,14 @@ function renderMemberDetail(key){
         m.rawFlowerIds = freshIds;
         m.baseFlowerIds = freshIds;
         computeRelationships();
+        capturedUpdatedAt = data.updated_at;
       }
     }catch(e){ /* mạng lỗi — vẫn cho sửa tiếp với dữ liệu đang có, đỡ hơn là chặn hẳn */ }
     editState = {
       memberKey: key,
       search: '',
       tier: '',
+      capturedUpdatedAt, // "dấu vân tay" thời điểm mở form — dùng để phát hiện xung đột lúc Lưu
       selected: new Set(getEffectiveFlowerIds(m)),
     };
     renderMemberDetail(key);
@@ -1021,21 +1024,24 @@ function renderMemberDetail(key){
     btn.disabled = true;
     btn.textContent = 'Đang tải…';
     // Tải lại tên/Zalo mới nhất trước khi cho sửa, tránh ghi đè lên thay đổi mới hơn của người khác.
+    let capturedUpdatedAt = null;
     try{
       const { data, error } = await supabaseClient
         .from('members')
-        .select('"Tên Game", Zalo')
+        .select('"Tên Game", Zalo, updated_at')
         .eq('ID_Acc', toIdAccNum(m.idAcc))
         .single();
       if(!error && data){
         if(data['Tên Game']) m.name = String(data['Tên Game']).trim();
         m.zalo = String(data['Zalo'] ?? '').trim();
+        capturedUpdatedAt = data.updated_at;
       }
     }catch(e){ /* mạng lỗi — vẫn cho sửa tiếp với dữ liệu đang có */ }
     editInfoState = {
       memberKey: key,
       name: m.name,
       zalo: m.zalo,
+      capturedUpdatedAt, // "dấu vân tay" thời điểm mở form — dùng để phát hiện xung đột lúc Lưu
       avatarDataUrl: state.avatars[key] || '',
       avatarRemoved: false,
       error: '',
@@ -1136,15 +1142,44 @@ function wireMemberInfoEdit(m){
     saveBtn.disabled = true;
     saveBtn.textContent = 'Đang lưu…';
 
-    const { error } = await supabaseClient
-      .from('members')
-      .update({ 'Tên Game': name, Zalo: zalo })
-      .eq('ID_Acc', toIdAccNum(m.idAcc));
+    let error, rows;
+    try{
+      let query = supabaseClient
+        .from('members')
+        .update({ 'Tên Game': name, Zalo: zalo })
+        .eq('ID_Acc', toIdAccNum(m.idAcc));
+      if(s.capturedUpdatedAt) query = query.eq('updated_at', s.capturedUpdatedAt);
+      const res = await query.select();
+      error = res.error;
+      rows = res.data;
+    }catch(networkErr){
+      error = networkErr;
+    }
 
     if(error){
       console.error(error);
-      s.error = 'Lưu thất bại: ' + (error.message || '');
+      s.error = 'Lưu thất bại: ' + (error.message || String(error));
       renderMemberDetail(m.key);
+      saveBtn.disabled = false;
+      saveBtn.textContent = '💾 Lưu thông tin';
+      return;
+    }
+
+    if(s.capturedUpdatedAt && (!rows || rows.length === 0)){
+      // updated_at không khớp — có người khác đã sửa thành viên này trong lúc mình đang thao tác.
+      // Giữ nguyên tên/Zalo đang gõ trong form (không renderMemberDetail thoát ra), chỉ làm mới
+      // "mốc" updated_at để bấm Lưu lại được, không bắt gõ lại từ đầu.
+      alert('⚠️ Ai đó vừa cập nhật hoa sở hữu của thành viên này trong lúc bạn đang sửa.\n Nội dung đang nhập vẫn chưa được lưu, hãy lưu lại lần nữa.');
+      try{
+        const { data: freshRow } = await supabaseClient
+          .from('members')
+          .select('updated_at')
+          .eq('ID_Acc', toIdAccNum(m.idAcc))
+          .single();
+        if(freshRow) s.capturedUpdatedAt = freshRow.updated_at;
+      }catch(e){ /* không lấy được mốc mới thì thôi, lần lưu sau sẽ không kèm điều kiện updated_at */ }
+      saveBtn.disabled = false;
+      saveBtn.textContent = '💾 Lưu thông tin';
       return;
     }
 
@@ -1218,13 +1253,19 @@ function wireMemberEdit(m){
     saveBtn.disabled = true;
     saveBtn.textContent = 'Đang lưu…';
 
-    let error;
+    let error, rows;
     try{
-      const res = await supabaseClient
+      let query = supabaseClient
         .from('members')
         .update({ ID_Hoa_So_Huu: flowerIds.join(',') })
         .eq('ID_Acc', toIdAccNum(m.idAcc));
+      // Nếu có "dấu vân tay" updated_at từ lúc mở form, chỉ cho ghi khi nó vẫn khớp —
+      // nếu ai đó đã sửa xen giữa, updated_at đã đổi, điều kiện này sẽ không khớp dòng nào,
+      // và query trả về mảng rỗng thay vì âm thầm ghi đè.
+      if(editState.capturedUpdatedAt) query = query.eq('updated_at', editState.capturedUpdatedAt);
+      const res = await query.select();
       error = res.error;
+      rows = res.data;
     }catch(networkErr){
       error = networkErr;
     }
@@ -1232,6 +1273,24 @@ function wireMemberEdit(m){
     if(error){
       console.error(error);
       alert('Lưu thất bại (kiểm tra lại kết nối mạng rồi thử lại): ' + (error.message || String(error)));
+      saveBtn.disabled = false;
+      saveBtn.textContent = '💾 Lưu thay đổi';
+      return;
+    }
+
+    if(editState.capturedUpdatedAt && (!rows || rows.length === 0)){
+      // updated_at không khớp — có người khác đã sửa thành viên này trong lúc mình đang thao tác.
+      // Giữ nguyên lựa chọn đang tick (editState.selected không đổi) để không bắt người dùng chọn lại
+      // từ đầu — chỉ làm mới "mốc" updated_at rồi cho họ xem lại/lưu lại.
+      alert('⚠️ Ai đó vừa cập nhật hoa sở hữu của thành viên này trong lúc bạn đang sửa.\nLựa chọn bạn đang tick vẫn chưa được lưu, hãy lưu lại lần nữa.');
+      try{
+        const { data: freshRow } = await supabaseClient
+          .from('members')
+          .select('updated_at')
+          .eq('ID_Acc', toIdAccNum(m.idAcc))
+          .single();
+        if(freshRow) editState.capturedUpdatedAt = freshRow.updated_at;
+      }catch(e){ /* không lấy được mốc mới thì thôi, lần lưu sau sẽ không kèm điều kiện updated_at */ }
       saveBtn.disabled = false;
       saveBtn.textContent = '💾 Lưu thay đổi';
       return;
