@@ -31,6 +31,40 @@ function nextMemberIdAcc(){
   return String(maxNum + 1);
 }
 
+/* Hỏi thẳng Supabase để lấy ID_Acc lớn nhất hiện có, thay vì dựa vào state.members
+   đã tải sẵn (có thể cũ nếu trang mở lâu). Dùng khi mở form "Thêm thành viên mới"
+   và khi cần thử lại vì bị trùng khóa. */
+async function fetchNextMemberIdAcc(){
+  const { data, error } = await supabaseClient
+    .from('members')
+    .select('ID_Acc')
+    .order('ID_Acc', { ascending: false })
+    .limit(1);
+  if(error || !data || !data.length) return nextMemberIdAcc();
+  const maxNum = Number(data[0].ID_Acc) || 0;
+  return String(maxNum + 1);
+}
+
+/* Tương tự cho mã hoa: hỏi Supabase các ID cùng hạng màu để tính ID kế tiếp mới nhất. */
+async function fetchNextFlowerId(tier){
+  const prefix = TIER_ID_PREFIX[tier];
+  if(!prefix) return '';
+  const { data, error } = await supabaseClient
+    .from('flowers')
+    .select('ID_Hoa')
+    .ilike('ID_Hoa', prefix + '%');
+  if(error) return nextFlowerId(tier);
+  const re = new RegExp('^' + prefix + '(\\d+)$', 'i');
+  let maxNum = 0;
+  (data||[]).forEach(row => {
+    const m = String(row.ID_Hoa||'').match(re);
+    if(m){ const n = parseInt(m[1],10); if(!isNaN(n) && n>maxNum) maxNum = n; }
+  });
+  const next = maxNum + 1;
+  const width = Math.max(3, String(next).length);
+  return prefix + String(next).padStart(width, '0');
+}
+
 /* ---------------- local-only persistence ----------------
    Sau refactor, Supabase là nguồn dữ liệu duy nhất cho flowers/members/quan hệ sở hữu.
    CHỈ avatar (ảnh đại diện) vẫn lưu localStorage riêng theo từng máy — theo yêu cầu,
@@ -281,6 +315,8 @@ function renderFlowerList(){
     addFlowerState = { name:'', tier:'', status:'Chưa Có', search:'', selected:new Set(), error:'' };
     renderFlowerList();
   });
+  // ID hiển thị ban đầu dựa vào state cục bộ (nhanh); ID thật sẽ được xác nhận lại
+  // với Supabase ngay trước khi lưu (xem wireAddFlower's btnSaveNewFlower).
 
   syncChipActive();
   paintFlowerGrid();
@@ -451,31 +487,48 @@ function wireAddFlower(){
       return;
     }
 
-    let id = nextFlowerId(tier);
-    while(state.flowerById[id]){
-      const m = id.match(/^(.*?)(\d+)$/);
-      id = m ? m[1] + String(parseInt(m[2],10)+1).padStart(m[2].length,'0') : id + 'X';
-    }
-
     const saveBtn = document.getElementById('btnSaveNewFlower');
     saveBtn.disabled = true;
     saveBtn.textContent = 'Đang lưu…';
 
-    const { error: insertErr } = await supabaseClient
-      .from('flowers')
-      .insert([{ ID_Hoa: id, Name: name, flower_color: tier, 'Trạng Thái': status, Image: '', 'List Acc': '' }]);
+    let id = await fetchNextFlowerId(tier);
+    let insertErr = null;
+    for(let attempt = 0; attempt < 5; attempt++){
+      const res = await supabaseClient
+        .from('flowers')
+        .insert([{ ID_Hoa: id, Name: name, flower_color: tier, 'Trạng Thái': status, Image: '', 'List Acc': '' }]);
+      insertErr = res.error;
+      if(!insertErr) break;
+      // mã bị trùng (người khác vừa thêm hoa cùng lúc) — hỏi lại Supabase và thử id kế tiếp
+      if(insertErr.code === '23505' || /duplicate key/i.test(insertErr.message||'')){
+        id = await fetchNextFlowerId(tier);
+        continue;
+      }
+      break; // lỗi khác (mạng, RLS...) — dừng thử lại, báo lỗi luôn
+    }
 
     if(insertErr){
       console.error(insertErr);
-      addFlowerState.error = 'Lưu hoa thất bại: ' + (insertErr.message || '');
+      addFlowerState.error = 'Lưu hoa thất bại: ' + (insertErr.message || String(insertErr));
       renderFlowerList();
       return;
     }
 
-    // gán chủ sở hữu đã chọn — cập nhật thẳng cột ID_Hoa_So_Huu của từng thành viên trên Supabase
+    // gán chủ sở hữu đã chọn — tải lại danh sách hoa MỚI NHẤT của từng người trước khi
+    // gộp thêm hoa mới vào, tránh ghi đè lên thay đổi mới hơn mà người khác vừa lưu.
     const selectedMembers = Array.from(addFlowerState.selected).map(k => state.memberByKey[k]).filter(Boolean);
     for(const m of selectedMembers){
-      const idsArr = Array.from(new Set([...m.baseFlowerIds, id]));
+      let currentIds = m.baseFlowerIds;
+      try{
+        const { data, error: fetchErr } = await supabaseClient
+          .from('members')
+          .select('ID_Hoa_So_Huu')
+          .eq('ID_Acc', toIdAccNum(m.idAcc))
+          .single();
+        if(!fetchErr && data) currentIds = splitList(String(data.ID_Hoa_So_Huu ?? ''));
+      }catch(e){ /* mạng lỗi — vẫn dùng dữ liệu đang có, đỡ hơn là bỏ qua hẳn thành viên này */ }
+
+      const idsArr = Array.from(new Set([...currentIds, id]));
       const { error: updErr } = await supabaseClient
         .from('members')
         .update({ ID_Hoa_So_Huu: idsArr.join(',') })
@@ -628,9 +681,11 @@ function renderMemberList(){
   document.getElementById('mSearch').addEventListener('input', e => { memberFilters.q = e.target.value; paintMemberGrid(); });
   document.getElementById('mSort').addEventListener('change', e => { memberFilters.sort = e.target.value; paintMemberGrid(); });
   document.getElementById('btnExportCSV').addEventListener('click', exportMembersCSV);
-  document.getElementById('btnAddMember').addEventListener('click', () => {
-    addMemberState = { name:'', zalo:'', idAcc:nextMemberIdAcc(), avatarDataUrl:'', search:'', tier:'', selected:new Set(), error:'' };
+  document.getElementById('btnAddMember').addEventListener('click', async () => {
+    addMemberState = { name:'', zalo:'', idAcc:'…', avatarDataUrl:'', search:'', tier:'', selected:new Set(), error:'' };
     renderMemberList();
+    addMemberState.idAcc = await fetchNextMemberIdAcc();
+    if(addMemberState) renderMemberList(); // vẫn đang ở form thêm thành viên thì cập nhật lại ID hiển thị
   });
   paintMemberGrid();
 }
@@ -728,21 +783,34 @@ function wireAddMember(){
       return;
     }
     const zalo = addMemberState.zalo.trim();
-    const idAcc = addMemberState.idAcc.trim();
     const flowerIds = Array.from(addMemberState.selected);
 
     const saveBtn = document.getElementById('btnSaveNewMember');
     saveBtn.disabled = true;
     saveBtn.textContent = 'Đang lưu…';
 
-    const { error: insertErr } = await supabaseClient
-      .from('members')
-      .insert([{ ID_Acc: toIdAccNum(idAcc), 'Tên Game': name, Zalo: zalo, ID_Hoa_So_Huu: flowerIds.join(',') }]);
+    let idAcc = addMemberState.idAcc.trim();
+    let insertErr = null;
+    for(let attempt = 0; attempt < 5; attempt++){
+      try{
+        const res = await supabaseClient
+          .from('members')
+          .insert([{ ID_Acc: toIdAccNum(idAcc), 'Tên Game': name, Zalo: zalo, ID_Hoa_So_Huu: flowerIds.join(',') }]);
+        insertErr = res.error;
+      }catch(networkErr){
+        insertErr = networkErr;
+      }
+      if(!insertErr) break;
+      if(insertErr.code === '23505' || /duplicate key/i.test(insertErr.message||'')){
+        idAcc = await fetchNextMemberIdAcc();
+        continue;
+      }
+      break; // lỗi khác (mạng, RLS...) — dừng thử lại, báo lỗi luôn
+    }
 
     if(insertErr){
       console.error(insertErr);
-      // lỗi phổ biến nhất ở đây là ID_Acc bị trùng do 2 người thêm gần như cùng lúc
-      addMemberState.error = 'Lưu thành viên thất bại (có thể ID_Acc bị trùng, thử lại): ' + (insertErr.message || '');
+      addMemberState.error = 'Lưu thành viên thất bại: ' + (insertErr.message || String(insertErr));
       renderMemberList();
       return;
     }
@@ -921,7 +989,25 @@ function renderMemberDetail(key){
       </div>
     </div>
   `;
-  document.getElementById('btnStartEdit').addEventListener('click', () => {
+  document.getElementById('btnStartEdit').addEventListener('click', async () => {
+    const btn = document.getElementById('btnStartEdit');
+    btn.disabled = true;
+    btn.textContent = 'Đang tải…';
+    // Trang có thể đã mở từ lâu — tải lại đúng dữ liệu mới nhất của riêng thành viên này
+    // trước khi cho sửa, để không vô tình ghi đè lên thay đổi mới hơn của người khác.
+    try{
+      const { data, error } = await supabaseClient
+        .from('members')
+        .select('ID_Hoa_So_Huu')
+        .eq('ID_Acc', toIdAccNum(m.idAcc))
+        .single();
+      if(!error && data){
+        const freshIds = splitList(String(data.ID_Hoa_So_Huu ?? '')).filter(id => state.flowerById[id]);
+        m.rawFlowerIds = freshIds;
+        m.baseFlowerIds = freshIds;
+        computeRelationships();
+      }
+    }catch(e){ /* mạng lỗi — vẫn cho sửa tiếp với dữ liệu đang có, đỡ hơn là chặn hẳn */ }
     editState = {
       memberKey: key,
       search: '',
@@ -930,7 +1016,22 @@ function renderMemberDetail(key){
     };
     renderMemberDetail(key);
   });
-  document.getElementById('btnStartEditInfo').addEventListener('click', () => {
+  document.getElementById('btnStartEditInfo').addEventListener('click', async () => {
+    const btn = document.getElementById('btnStartEditInfo');
+    btn.disabled = true;
+    btn.textContent = 'Đang tải…';
+    // Tải lại tên/Zalo mới nhất trước khi cho sửa, tránh ghi đè lên thay đổi mới hơn của người khác.
+    try{
+      const { data, error } = await supabaseClient
+        .from('members')
+        .select('"Tên Game", Zalo')
+        .eq('ID_Acc', toIdAccNum(m.idAcc))
+        .single();
+      if(!error && data){
+        if(data['Tên Game']) m.name = String(data['Tên Game']).trim();
+        m.zalo = String(data['Zalo'] ?? '').trim();
+      }
+    }catch(e){ /* mạng lỗi — vẫn cho sửa tiếp với dữ liệu đang có */ }
     editInfoState = {
       memberKey: key,
       name: m.name,
@@ -1117,14 +1218,20 @@ function wireMemberEdit(m){
     saveBtn.disabled = true;
     saveBtn.textContent = 'Đang lưu…';
 
-    const { error } = await supabaseClient
-      .from('members')
-      .update({ ID_Hoa_So_Huu: flowerIds.join(',') })
-      .eq('ID_Acc', toIdAccNum(m.idAcc));
+    let error;
+    try{
+      const res = await supabaseClient
+        .from('members')
+        .update({ ID_Hoa_So_Huu: flowerIds.join(',') })
+        .eq('ID_Acc', toIdAccNum(m.idAcc));
+      error = res.error;
+    }catch(networkErr){
+      error = networkErr;
+    }
 
     if(error){
       console.error(error);
-      alert('Lưu thất bại: ' + (error.message || ''));
+      alert('Lưu thất bại (kiểm tra lại kết nối mạng rồi thử lại): ' + (error.message || String(error)));
       saveBtn.disabled = false;
       saveBtn.textContent = '💾 Lưu thay đổi';
       return;
