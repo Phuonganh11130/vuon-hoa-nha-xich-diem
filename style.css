@@ -1,5 +1,6 @@
 /* ===================== Tokens ===================== */
 :root{
+  --card-bg:#f3dfd2;
   --sky-1:#EFE7F6;
   --sky-2:#F6EFE4;
   --sky-3:#EAF2EE;
@@ -11,7 +12,7 @@
   --rose:#C13A63;
   --rose-deep:#9C2C4D;
   --rose-light:#F6D6E1;
-  --gold:#C4923F;
+  --gold:#e6a58f;
   --gold-light:#F1DFAF;
   --jade:#5E8E71;
   --jade-light:#DDEBDF;
@@ -108,7 +109,7 @@ button{font-family:inherit;}
 /* ===================== Toolbar (search/filter/sort) ===================== */
 .toolbar{
   display:flex; flex-wrap:wrap; gap:12px; align-items:center;
-  background:var(--paper);
+  background:var(--card-bg);
   border:1px solid var(--paper-edge);
   border-radius:var(--radius-lg);
   padding:16px 18px;
@@ -165,7 +166,7 @@ button{font-family:inherit;}
   grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));
 }
 .flower-card{
-  background:var(--paper);
+  background: var(--card-bg);
   border:1px solid var(--paper-edge);
   border-radius:var(--radius-lg);
   overflow:hidden;
@@ -277,7 +278,7 @@ button{font-family:inherit;}
 .member-grid{display:grid; gap:16px; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr));}
 .member-card{
   display:flex; align-items:center; gap:14px;
-  background:var(--paper); border:1px solid var(--paper-edge); border-radius:var(--radius-md);
+  background:var(--card-bg); border:1px solid var(--paper-edge); border-radius:var(--radius-md);
   padding:16px; box-shadow:var(--shadow-soft); transition:transform .15s ease, box-shadow .15s ease;
 }
 .member-card:hover{transform:translateY(-3px); box-shadow:var(--shadow-card);}
