@@ -297,7 +297,7 @@ function renderFlowerList(){
         <label>Nhiệm vụ</label>
         <label for="fQuest" style="display:flex;align-items:center;gap:8px;height:38px;cursor:pointer;user-select:none;">
           <input id="fQuest" type="checkbox" style="width:18px;height:18px;cursor:pointer;accent-color:#2f6fed;">
-          <span>Hoa có người nhận nhiệm vụ</span>
+          <span>Hoa đua hội</span>
         </label>
       </div>
       <div class="select-field">
