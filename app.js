@@ -77,6 +77,7 @@ const state = {
   avatars: {},          // memberKey -> avatar image data URL (chỉ lưu local, xem ghi chú trên)
   ownersByFlower: {},   // flowerId -> [memberKey,...]  (tính từ baseFlowerIds)
   flowersByMember: {},  // memberKey -> [flowerId,...]  (tính từ baseFlowerIds)
+  questFlowerIds: new Set(), // flowerId -> có ít nhất 1 thành viên tick "muốn làm nhiệm vụ"
   flowerById: {},
   memberByKey: {},
   loaded: false,
@@ -111,14 +112,19 @@ function toIdAccNum(idAcc){
 function computeRelationships(){
   const ownersByFlower = {};
   const flowersByMember = {};
+  const questFlowerIds = new Set();
   state.flowers.forEach(f => ownersByFlower[f.id] = []);
   state.members.forEach(m => {
     const ids = getEffectiveFlowerIds(m).filter(id => state.flowerById[id]);
     flowersByMember[m.key] = ids;
     ids.forEach(id => ownersByFlower[id].push(m.key));
+    (m.baseQuestFlowerIds || []).forEach(id => {
+      if(state.flowerById[id]) questFlowerIds.add(id);
+    });
   });
   state.ownersByFlower = ownersByFlower;
   state.flowersByMember = flowersByMember;
+  state.questFlowerIds = questFlowerIds;
 }
 
 function splitList(str){
@@ -150,6 +156,9 @@ async function loadData(){
       zalo: String(row['Zalo'] ?? '').trim(),
       rawFlowerIds: splitList(String(row['ID_Hoa_So_Huu'] ?? '')),
       baseFlowerIds: [],
+      // Hoa mà thành viên tick "muốn làm nhiệm vụ" — lưu ở cột riêng ID_Hoa_Nhiem_Vu.
+      rawQuestFlowerIds: splitList(String(row['ID_Hoa_Nhiem_Vu'] ?? '')),
+      baseQuestFlowerIds: [],
     };
   }).filter(m => m.name && m.key);
 
@@ -172,6 +181,9 @@ async function loadData(){
   // tham khảo/tìm kiếm (xem paintFlowerGrid), chỉ không dùng để tính sở hữu nữa.
   state.members.forEach(m => {
     m.baseFlowerIds = m.rawFlowerIds.filter(id => state.flowerById[id]);
+    // Chỉ tính là "muốn làm nhiệm vụ" nếu hoa đó vẫn đang thực sự thuộc sở hữu của thành viên
+    // (tránh sót lại hoa đã bị gỡ khỏi sở hữu nhưng ID vẫn còn nằm trong ID_Hoa_Nhiem_Vu).
+    m.baseQuestFlowerIds = m.rawQuestFlowerIds.filter(id => m.baseFlowerIds.includes(id));
   });
 
   state.avatars = loadAvatars();
@@ -249,7 +261,7 @@ async function render(){
 }
 
 /* ---------------- Flower list page ---------------- */
-let flowerFilters = { q:'', tier:'', status:'', sort:'id-asc' };
+let flowerFilters = { q:'', tier:'', status:'', quest:false, sort:'id-asc' };
 let addFlowerState = null; // { name, tier, status, search:'', selected:Set<memberKey>, error:'' }
 
 function renderFlowerList(){
@@ -265,7 +277,7 @@ function renderFlowerList(){
   app.innerHTML = `
     <div class="scroll-banner">Danh Sách Hoa</div>
     <div class="tier-chips" id="tierChips">
-      ${chipHTML('', 'Tất cả', '#C4923F')}
+      ${chipHTML('', 'Tất cả', '#e6a58f')}
       ${TIER_ORDER.map(t => chipHTML(t, t, tierColor(t))).join('')}
     </div>
     <div class="toolbar">
@@ -280,6 +292,13 @@ function renderFlowerList(){
           <option value="yes">Đã có</option>
           <option value="no">Chưa có</option>
         </select>
+      </div>
+      <div class="select-field">
+        <label>Nhiệm vụ</label>
+        <label for="fQuest" style="display:flex;align-items:center;gap:8px;height:38px;cursor:pointer;user-select:none;">
+          <input id="fQuest" type="checkbox" style="width:18px;height:18px;cursor:pointer;accent-color:#2f6fed;">
+          <span>Hoa có người nhận nhiệm vụ</span>
+        </label>
       </div>
       <div class="select-field">
         <label>Sắp xếp</label>
@@ -299,10 +318,12 @@ function renderFlowerList(){
 
   document.getElementById('fSearch').value = flowerFilters.q;
   document.getElementById('fStatus').value = flowerFilters.status;
+  document.getElementById('fQuest').checked = flowerFilters.quest;
   document.getElementById('fSort').value = flowerFilters.sort;
 
   document.getElementById('fSearch').addEventListener('input', e => { flowerFilters.q = e.target.value; paintFlowerGrid(); });
   document.getElementById('fStatus').addEventListener('change', e => { flowerFilters.status = e.target.value; paintFlowerGrid(); });
+  document.getElementById('fQuest').addEventListener('change', e => { flowerFilters.quest = e.target.checked; paintFlowerGrid(); });
   document.getElementById('fSort').addEventListener('change', e => { flowerFilters.sort = e.target.value; paintFlowerGrid(); });
   document.getElementById('tierChips').addEventListener('click', e => {
     const chip = e.target.closest('.tier-chip');
@@ -358,6 +379,9 @@ function paintFlowerGrid(){
   } else if(flowerFilters.status === 'no'){
     list = list.filter(f => f.status !== 'Đã Có');
   }
+  if(flowerFilters.quest){
+    list = list.filter(f => state.questFlowerIds.has(f.id));
+  }
 
   const ownersCount = f => (state.ownersByFlower[f.id]||[]).length;
   switch(flowerFilters.sort){
@@ -393,7 +417,10 @@ function paintFlowerGrid(){
       </a>
       <div class="fc-owners">
         ${owners.length
-          ? owners.map(m => `<a class="fc-owner-chip" href="#/thanhvien/${m.key}" data-link>${esc(m.name)}</a>`).join('')
+          ? owners.map(m => {
+              const wantsQuest = (m.baseQuestFlowerIds || []).includes(f.id);
+              return `<a class="fc-owner-chip${wantsQuest ? ' fc-owner-chip-quest' : ''}"${wantsQuest ? ' style="color:#2f6fed"' : ''} href="#/thanhvien/${m.key}" data-link title="${wantsQuest ? 'Muốn làm nhiệm vụ với hoa này' : ''}">${esc(m.name)}</a>`;
+            }).join('')
           : `<span class="fc-no-owner">Chưa có ai sở hữu</span>`}
       </div>
     </div>`;
@@ -588,13 +615,23 @@ function paintNewFlowerMemberChecklist(){
 }
 
 /* ---------------- Flower detail page ---------------- */
+let editFlowerInfoState = null; // { flowerId, name, tier, status, error }
+
 function renderFlowerDetail(id){
   const app = document.getElementById('app');
   const f = state.flowerById[id];
   if(!f){
+    editFlowerInfoState = null;
     app.innerHTML = notFound('hoa', 'Không tìm thấy đóa hoa này.');
     return;
   }
+
+  if(editFlowerInfoState && editFlowerInfoState.flowerId === id){
+    app.innerHTML = flowerInfoEditShell(f);
+    wireFlowerInfoEdit(f);
+    return;
+  }
+
   const color = tierColor(f.tier);
   const ownerKeys = state.ownersByFlower[f.id] || [];
   const owners = ownerKeys.map(k => state.memberByKey[k]).filter(Boolean);
@@ -608,6 +645,9 @@ function renderFlowerDetail(id){
           <div class="hero-caption"><h1>${esc(f.name)}</h1></div>
         </div>
         <div class="detail-body">
+          <div class="dp-row" style="border-bottom:none; justify-content:flex-end;">
+            <button class="btn-edit btn-edit-alt" id="btnStartEditFlowerInfo">✏️ Sửa thông tin hoa</button>
+          </div>
           <div class="dp-row">
             <span class="dp-label">Mã đóa hoa</span>
             <span class="dp-value">${esc(f.id)}</span>
@@ -638,6 +678,120 @@ function renderFlowerDetail(id){
       </div>
     </div>
   `;
+
+  document.getElementById('btnStartEditFlowerInfo').addEventListener('click', () => {
+    editFlowerInfoState = {
+      flowerId: id,
+      name: f.name,
+      tier: f.tier,
+      status: f.status,
+      error: '',
+    };
+    renderFlowerDetail(id);
+  });
+}
+
+function flowerInfoEditShell(f){
+  const s = editFlowerInfoState;
+  const color = tierColor(s.tier);
+  return `
+    <div class="detail-wrap">
+      <a class="back-link" href="#/hoa/${encodeURIComponent(f.id)}" data-link id="linkCancelEditFlowerInfo">← Quay lại</a>
+      <div class="detail-card">
+        <div class="member-detail-head">
+          <span class="avatar" style="background:${color}">🌸</span>
+          <div>
+            <h1>Sửa thông tin hoa</h1>
+            <div class="sub">Cập nhật tên, hạng màu, trạng thái</div>
+          </div>
+        </div>
+        <div class="edit-toolbar" style="flex-wrap:wrap;">
+          <div class="select-field">
+            <label>Mã đóa hoa — không thể thay đổi</label>
+            <input id="editFlowerId" type="text" value="${esc(f.id)}" disabled>
+          </div>
+          <div class="select-field" style="flex:1 1 220px;">
+            <label>Tên hoa</label>
+            <input id="editFlowerName" type="text" value="${esc(s.name)}">
+          </div>
+          <div class="select-field">
+            <label>Hạng màu</label>
+            <select id="editFlowerTier">
+              ${TIER_ORDER.map(t => `<option value="${esc(t)}" ${s.tier===t?'selected':''}>${esc(t)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="select-field">
+            <label>Trạng thái</label>
+            <select id="editFlowerStatus">
+              <option value="Đã Có" ${s.status==='Đã Có'?'selected':''}>Đã Có</option>
+              <option value="Chưa Có" ${s.status!=='Đã Có'?'selected':''}>Chưa Có</option>
+            </select>
+          </div>
+        </div>
+        ${s.error ? `<div class="empty-state" style="padding:10px 14px;"><span class="em-ico">⚠️</span>${esc(s.error)}</div>` : ''}
+        <div class="edit-actions">
+          <button class="btn-primary" id="btnSaveFlowerInfo">💾 Lưu thay đổi</button>
+          <button class="btn-ghost" id="btnCancelEditFlowerInfo">Hủy</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function wireFlowerInfoEdit(f){
+  const s = editFlowerInfoState;
+  const cancel = () => { editFlowerInfoState = null; renderFlowerDetail(f.id); };
+
+  document.getElementById('linkCancelEditFlowerInfo').addEventListener('click', (e) => { e.preventDefault(); cancel(); });
+  document.getElementById('btnCancelEditFlowerInfo').addEventListener('click', cancel);
+
+  document.getElementById('editFlowerName').addEventListener('input', e => { s.name = e.target.value; });
+  document.getElementById('editFlowerTier').addEventListener('change', e => { s.tier = e.target.value; });
+  document.getElementById('editFlowerStatus').addEventListener('change', e => { s.status = e.target.value; });
+
+  document.getElementById('btnSaveFlowerInfo').addEventListener('click', async () => {
+    const name = document.getElementById('editFlowerName').value.trim();
+    const tier = document.getElementById('editFlowerTier').value;
+    const status = document.getElementById('editFlowerStatus').value;
+
+    if(!name){
+      s.error = 'Vui lòng nhập tên hoa.';
+      renderFlowerDetail(f.id);
+      return;
+    }
+
+    const saveBtn = document.getElementById('btnSaveFlowerInfo');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Đang lưu…';
+
+    let error;
+    try{
+      const res = await supabaseClient
+        .from('flowers')
+        .update({ Name: name, flower_color: tier, 'Trạng Thái': status })
+        .eq('ID_Hoa', f.id);
+      error = res.error;
+    }catch(networkErr){
+      error = networkErr;
+    }
+
+    if(error){
+      console.error(error);
+      s.error = 'Lưu thất bại: ' + (error.message || String(error));
+      renderFlowerDetail(f.id);
+      saveBtn.disabled = false;
+      saveBtn.textContent = '💾 Lưu thay đổi';
+      return;
+    }
+
+    // cập nhật local state để giao diện phản ánh ngay, không cần tải lại trang
+    f.name = name;
+    f.tier = tier;
+    f.status = status;
+
+    editFlowerInfoState = null;
+    renderFlowerDetail(f.id);
+  });
 }
 
 /* ---------------- Member list page ---------------- */
@@ -929,6 +1083,7 @@ function paintMemberGrid(){
 /* ---------------- Member detail page (view + edit) ---------------- */
 let editState = null; // { memberKey, search:'', tier:'', selected:Set<flowerId> }
 let editInfoState = null; // { memberKey, name, zalo, avatarDataUrl, avatarRemoved, error }
+let questState = null; // { memberKey, search:'', tier:'', capturedUpdatedAt, selected:Set<flowerId>, error }
 
 function renderMemberDetail(key){
   const app = document.getElementById('app');
@@ -936,6 +1091,7 @@ function renderMemberDetail(key){
   if(!m){
     editState = null;
     editInfoState = null;
+    questState = null;
     app.innerHTML = notFound('thanhvien', 'Không tìm thấy thành viên này.');
     return;
   }
@@ -950,6 +1106,13 @@ function renderMemberDetail(key){
   if(editInfoState && editInfoState.memberKey === key){
     app.innerHTML = memberInfoEditShell(m);
     wireMemberInfoEdit(m);
+    return;
+  }
+
+  if(questState && questState.memberKey === key){
+    app.innerHTML = memberQuestShell(m);
+    wireMemberQuest(m);
+    paintQuestChecklist();
     return;
   }
 
@@ -970,6 +1133,7 @@ function renderMemberDetail(key){
           <div class="head-btn-group">
             <button class="btn-edit btn-edit-alt" id="btnStartEditInfo">🧑‍💼 Sửa thông tin</button>
             <button class="btn-edit" id="btnStartEdit">✏️ Cập nhật hoa sở hữu</button>
+            <button class="btn-edit btn-edit-alt" id="btnStartQuest">🎯 Hoa muốn làm nhiệm vụ</button>
           </div>
         </div>
         <div class="flower-mini-list">
@@ -978,11 +1142,13 @@ function renderMemberDetail(key){
           </div>
           ${flowers.length ? flowers.map(f => {
             const color = tierColor(f.tier);
+            const isQuest = (m.baseQuestFlowerIds||[]).includes(f.id);
             return `
             <a class="flower-mini" href="#/hoa/${encodeURIComponent(f.id)}" data-link>
               <span class="fm-swatch" style="background:${color}">🌸</span>
-              <span class="fm-name">${esc(f.name)}</span>
+              <span class="fm-name"${isQuest ? ' style="color:#2f6fed"' : ''}>${esc(f.name)}</span>
               <span class="fm-id">${esc(f.id)}</span>
+              ${isQuest ? '<span class="pill" style="background:#2f6fed;">🎯 Nhiệm vụ</span>' : ''}
             </a>`;
           }).join('') : `<span class="no-owner-note">Thành viên này chưa sở hữu hoa nào.</span>`}
         </div>
@@ -1016,6 +1182,39 @@ function renderMemberDetail(key){
       tier: '',
       capturedUpdatedAt, // "dấu vân tay" thời điểm mở form — dùng để phát hiện xung đột lúc Lưu
       selected: new Set(getEffectiveFlowerIds(m)),
+    };
+    renderMemberDetail(key);
+  });
+  document.getElementById('btnStartQuest').addEventListener('click', async () => {
+    const btn = document.getElementById('btnStartQuest');
+    btn.disabled = true;
+    btn.textContent = 'Đang tải…';
+    // Tải lại sở hữu + nhiệm vụ mới nhất trước khi cho tick, tránh ghi đè thay đổi mới hơn của người khác.
+    let capturedUpdatedAt = null;
+    try{
+      const { data, error } = await supabaseClient
+        .from('members')
+        .select('ID_Hoa_So_Huu, ID_Hoa_Nhiem_Vu, updated_at')
+        .eq('ID_Acc', toIdAccNum(m.idAcc))
+        .single();
+      if(!error && data){
+        const freshOwnedIds = splitList(String(data.ID_Hoa_So_Huu ?? '')).filter(id => state.flowerById[id]);
+        m.rawFlowerIds = freshOwnedIds;
+        m.baseFlowerIds = freshOwnedIds;
+        const freshQuestIds = splitList(String(data.ID_Hoa_Nhiem_Vu ?? '')).filter(id => freshOwnedIds.includes(id));
+        m.rawQuestFlowerIds = freshQuestIds;
+        m.baseQuestFlowerIds = freshQuestIds;
+        computeRelationships();
+        capturedUpdatedAt = data.updated_at;
+      }
+    }catch(e){ /* mạng lỗi — vẫn cho tick tiếp với dữ liệu đang có, đỡ hơn là chặn hẳn */ }
+    questState = {
+      memberKey: key,
+      search: '',
+      tier: '',
+      capturedUpdatedAt,
+      selected: new Set(m.baseQuestFlowerIds || []),
+      error: '',
     };
     renderMemberDetail(key);
   });
@@ -1055,7 +1254,7 @@ function memberInfoEditShell(m){
   const previewSrc = s.avatarRemoved ? '' : s.avatarDataUrl;
   return `
     <div class="detail-wrap">
-      <a class="back-link" href="#/thanhvien" data-link>← Quay lại Thành Viên</a>
+      <a class="back-link" href="#/thanhvien/${m.key}" data-link id="linkCancelEditInfo">← Quay lại Thành Viên</a>
       <div class="detail-card">
         <div class="member-detail-head">
           ${previewSrc
@@ -1099,6 +1298,11 @@ function memberInfoEditShell(m){
 
 function wireMemberInfoEdit(m){
   const s = editInfoState;
+  document.getElementById('linkCancelEditInfo').addEventListener('click', (e) => {
+    e.preventDefault();
+    editInfoState = null;
+    renderMemberDetail(m.key);
+  });
   document.getElementById('infoName').addEventListener('input', e => { s.name = e.target.value; });
   document.getElementById('infoZalo').addEventListener('input', e => { s.zalo = e.target.value; });
   // ID_Acc bị vô hiệu hóa — đây là khóa định danh cố định dùng để đồng bộ Supabase, không cho sửa.
@@ -1201,7 +1405,7 @@ function wireMemberInfoEdit(m){
 function memberEditShell(m){
   return `
     <div class="detail-wrap">
-      <a class="back-link" href="#/thanhvien" data-link>← Quay lại Thành Viên</a>
+      <a class="back-link" href="#/thanhvien/${m.key}" data-link id="linkCancelEdit">← Quay lại Thành Viên</a>
       <div class="detail-card">
         <div class="member-detail-head">
           <span class="avatar">${esc(initials(m.name))}</span>
@@ -1232,6 +1436,11 @@ function memberEditShell(m){
 }
 
 function wireMemberEdit(m){
+  document.getElementById('linkCancelEdit').addEventListener('click', (e) => {
+    e.preventDefault();
+    editState = null;
+    renderMemberDetail(m.key);
+  });
   document.getElementById('editSearch').addEventListener('input', e => {
     editState.search = e.target.value; paintEditChecklist();
   });
@@ -1343,6 +1552,165 @@ function paintEditChecklist(){
       else editState.selected.delete(fid);
       e.target.closest('.edit-row').classList.toggle('checked', e.target.checked);
       document.getElementById('editSelectedCount').textContent = `${editState.selected.size} hoa đã chọn`;
+    });
+  });
+}
+
+/* ---------------- Chọn hoa muốn làm nhiệm vụ (chỉ trong số hoa đang sở hữu) ---------------- */
+function memberQuestShell(m){
+  const s = questState;
+  return `
+    <div class="detail-wrap">
+      <a class="back-link" href="#/thanhvien/${m.key}" data-link id="linkCancelQuest">← Quay lại Thành Viên</a>
+      <div class="detail-card">
+        <div class="member-detail-head">
+          <span class="avatar">${esc(initials(m.name))}</span>
+          <div>
+            <h1>${esc(m.name)}</h1>
+            <div class="sub">Chọn hoa (trong số hoa đang sở hữu) muốn làm nhiệm vụ — tick/bỏ tick rồi bấm Lưu</div>
+          </div>
+        </div>
+        <div class="edit-toolbar">
+          <div class="search-box">
+            <span>🔎</span>
+            <input id="questSearch" type="text" placeholder="Tìm trong hoa đang sở hữu…">
+          </div>
+          <div class="tier-chips" id="questTierChips">
+            ${chipHTML('', 'Tất cả', '#C4923F')}
+            ${TIER_ORDER.map(t => chipHTML(t, t, tierColor(t))).join('')}
+          </div>
+          <span class="edit-selected-count" id="questSelectedCount"></span>
+        </div>
+        ${s.error ? `<div class="empty-state" style="padding:10px 14px;"><span class="em-ico">⚠️</span>${esc(s.error)}</div>` : ''}
+        <div class="edit-checklist" id="questChecklist"></div>
+        <div class="edit-actions">
+          <button class="btn-primary" id="btnSaveQuest">💾 Lưu lựa chọn nhiệm vụ</button>
+          <button class="btn-ghost" id="btnCancelQuest">Hủy</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function wireMemberQuest(m){
+  document.getElementById('linkCancelQuest').addEventListener('click', (e) => {
+    e.preventDefault();
+    questState = null;
+    renderMemberDetail(m.key);
+  });
+  document.getElementById('questSearch').addEventListener('input', e => {
+    questState.search = e.target.value; paintQuestChecklist();
+  });
+  document.getElementById('questTierChips').addEventListener('click', e => {
+    const chip = e.target.closest('.tier-chip');
+    if(!chip) return;
+    questState.tier = chip.dataset.tier;
+    paintQuestChecklist();
+    document.querySelectorAll('#questTierChips .tier-chip').forEach(c=>{
+      const active = c.dataset.tier === questState.tier;
+      c.classList.toggle('active', active);
+      c.style.background = active ? c.style.getPropertyValue('--c') : '';
+    });
+  });
+  document.getElementById('btnCancelQuest').addEventListener('click', () => {
+    questState = null;
+    renderMemberDetail(m.key);
+  });
+  document.getElementById('btnSaveQuest').addEventListener('click', async () => {
+    const flowerIds = Array.from(questState.selected);
+
+    const saveBtn = document.getElementById('btnSaveQuest');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Đang lưu…';
+
+    let error, rows;
+    try{
+      let query = supabaseClient
+        .from('members')
+        .update({ ID_Hoa_Nhiem_Vu: flowerIds.join(',') })
+        .eq('ID_Acc', toIdAccNum(m.idAcc));
+      if(questState.capturedUpdatedAt) query = query.eq('updated_at', questState.capturedUpdatedAt);
+      const res = await query.select();
+      error = res.error;
+      rows = res.data;
+    }catch(networkErr){
+      error = networkErr;
+    }
+
+    if(error){
+      console.error(error);
+      questState.error = 'Lưu thất bại: ' + (error.message || String(error));
+      renderMemberDetail(m.key);
+      saveBtn.disabled = false;
+      saveBtn.textContent = '💾 Lưu lựa chọn nhiệm vụ';
+      return;
+    }
+
+    if(questState.capturedUpdatedAt && (!rows || rows.length === 0)){
+      // updated_at không khớp — có người khác đã sửa thành viên này trong lúc mình đang thao tác.
+      // Giữ nguyên lựa chọn đang tick, chỉ làm mới "mốc" updated_at rồi cho lưu lại.
+      alert('⚠️ Ai đó vừa cập nhật thông tin của thành viên này trong lúc bạn đang tick.\nLựa chọn bạn đang tick vẫn chưa được lưu, hãy lưu lại lần nữa.');
+      try{
+        const { data: freshRow } = await supabaseClient
+          .from('members')
+          .select('updated_at')
+          .eq('ID_Acc', toIdAccNum(m.idAcc))
+          .single();
+        if(freshRow) questState.capturedUpdatedAt = freshRow.updated_at;
+      }catch(e){ /* không lấy được mốc mới thì thôi, lần lưu sau sẽ không kèm điều kiện updated_at */ }
+      saveBtn.disabled = false;
+      saveBtn.textContent = '💾 Lưu lựa chọn nhiệm vụ';
+      return;
+    }
+
+    m.rawQuestFlowerIds = flowerIds;
+    m.baseQuestFlowerIds = flowerIds;
+
+    computeRelationships();
+    questState = null;
+    renderMemberDetail(m.key);
+  });
+}
+
+function paintQuestChecklist(){
+  const box = document.getElementById('questChecklist');
+  const q = questState.search.trim().toLowerCase();
+  let list = (state.flowersByMember[questState.memberKey] || [])
+    .map(id => state.flowerById[id]).filter(Boolean);
+  if(q) list = list.filter(f => f.name.toLowerCase().includes(q) || f.id.toLowerCase().includes(q));
+  if(questState.tier) list = list.filter(f => f.tier === questState.tier);
+  list.sort((a,b)=>a.id.localeCompare(b.id));
+
+  document.getElementById('questSelectedCount').textContent = `${questState.selected.size} hoa đã chọn làm nhiệm vụ`;
+
+  if(!list.length){
+    box.innerHTML = `<div class="empty-state"><span class="em-ico">🥀</span>${
+      questState.search.trim()
+        ? 'Không tìm thấy hoa nào phù hợp trong số hoa đang sở hữu.'
+        : 'Thành viên này chưa sở hữu hoa nào để chọn làm nhiệm vụ.'
+    }</div>`;
+    return;
+  }
+
+  box.innerHTML = list.map(f => {
+    const color = tierColor(f.tier);
+    const checked = questState.selected.has(f.id);
+    return `
+    <label class="edit-row ${checked ? 'checked':''}">
+      <input type="checkbox" data-fid="${esc(f.id)}" ${checked ? 'checked':''}>
+      <span class="fm-swatch" style="background:${color}">🌸</span>
+      <span class="fm-name">${esc(f.name)}</span>
+      <span class="fm-id">${esc(f.id)}</span>
+    </label>`;
+  }).join('');
+
+  box.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', e => {
+      const fid = e.target.dataset.fid;
+      if(e.target.checked) questState.selected.add(fid);
+      else questState.selected.delete(fid);
+      e.target.closest('.edit-row').classList.toggle('checked', e.target.checked);
+      document.getElementById('questSelectedCount').textContent = `${questState.selected.size} hoa đã chọn làm nhiệm vụ`;
     });
   });
 }
