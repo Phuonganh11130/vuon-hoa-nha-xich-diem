@@ -71,6 +71,32 @@ async function fetchNextFlowerId(tier){
    phần này chưa cần đồng bộ đa thiết bị. */
 const AVATARS_KEY = 'hoaSoHuu_avatars_v1';
 
+/* ---------------- Supabase Storage cho ảnh hoa ----------------
+   Bucket PUBLIC, ảnh được lưu trong folder "assets" bên trong bucket.
+   Đổi FLOWER_IMAGE_BUCKET nếu tên bucket của bạn khác. */
+const FLOWER_IMAGE_BUCKET = 'assets';       // <-- đổi thành đúng tên bucket trên Supabase
+const FLOWER_IMAGE_FOLDER = 'flowers';      // subfolder trong bucket, có thể để '' nếu không cần
+
+/* Upload 1 file ảnh lên Supabase Storage, trả về public URL để lưu vào cột Image.
+   Ném lỗi nếu upload thất bại — nơi gọi tự xử lý (hiện lỗi cho người dùng). */
+async function uploadFlowerImage(file, flowerId){
+  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+  const safeId = String(flowerId || 'hoa').replace(/[^a-zA-Z0-9_-]/g, '');
+  const path = `${FLOWER_IMAGE_FOLDER ? FLOWER_IMAGE_FOLDER + '/' : ''}${safeId}-${Date.now()}.${ext}`;
+
+  const { error: uploadError } = await supabaseClient
+    .storage
+    .from(FLOWER_IMAGE_BUCKET)
+    .upload(path, file, { cacheControl: '3600', upsert: false });
+  if(uploadError) throw uploadError;
+
+  const { data } = supabaseClient
+    .storage
+    .from(FLOWER_IMAGE_BUCKET)
+    .getPublicUrl(path);
+  return data.publicUrl;
+}
+
 const state = {
   flowers: [],      // [{id,name,tier,status,listAccNames:[],image}]
   members: [],      // [{key,idAcc,name,zalo,baseFlowerIds:[]}]  — key = idAcc (khóa cố định)
@@ -213,6 +239,9 @@ function tierColor(tier){
   return (TIER_META[tier] && TIER_META[tier].color) || 'var(--ink-faint)';
 }
 function flowerMediaInner(f){
+  if(f.image){
+    return `<img class="fc-media-img" src="${esc(f.image)}" alt="${esc(f.name)}" loading="lazy" onerror="this.remove()">`;
+  }
   return '🌸';
 }
 
@@ -333,7 +362,7 @@ function renderFlowerList(){
     syncChipActive();
   });
   document.getElementById('btnAddFlower').addEventListener('click', () => {
-    addFlowerState = { name:'', tier:'', status:'Chưa Có', search:'', selected:new Set(), error:'' };
+    addFlowerState = { name:'', tier:'', status:'Chưa Có', search:'', selected:new Set(), imageFile:null, imagePreview:'', error:'' };
     renderFlowerList();
   });
   // ID hiển thị ban đầu dựa vào state cục bộ (nhanh); ID thật sẽ được xác nhận lại
@@ -464,6 +493,11 @@ function addFlowerShell(){
               <option value="Chưa Có" ${s.status!=='Đã Có'?'selected':''}>Chưa Có</option>
             </select>
           </div>
+          <div class="select-field" style="flex:1 1 220px;">
+            <label>Ảnh hoa (tùy chọn)</label>
+            <input id="newFlowerImageFile" type="file" accept="image/*">
+            ${s.imagePreview ? `<img src="${esc(s.imagePreview)}" alt="preview" style="margin-top:6px;max-width:120px;max-height:120px;border-radius:8px;object-fit:cover;">` : ''}
+          </div>
         </div>
         ${s.error ? `<div class="empty-state" style="padding:10px 14px;"><span class="em-ico">⚠️</span>${esc(s.error)}</div>` : ''}
         <div class="edit-toolbar">
@@ -497,6 +531,15 @@ function wireAddFlower(){
   document.getElementById('newFlowerMemberSearch').addEventListener('input', e => {
     addFlowerState.search = e.target.value; paintNewFlowerMemberChecklist();
   });
+  document.getElementById('newFlowerImageFile').addEventListener('change', e => {
+    const file = e.target.files && e.target.files[0];
+    addFlowerState.imageFile = file || null;
+    if(file){
+      const reader = new FileReader();
+      reader.onload = () => { addFlowerState.imagePreview = reader.result; renderFlowerList(); };
+      reader.readAsDataURL(file);
+    }
+  });
 
   document.getElementById('btnSaveNewFlower').addEventListener('click', async () => {
     const name = addFlowerState.name.trim();
@@ -519,11 +562,27 @@ function wireAddFlower(){
     saveBtn.textContent = 'Đang lưu…';
 
     let id = await fetchNextFlowerId(tier);
+
+    // nếu có chọn ảnh, upload lên Supabase Storage trước để lấy public URL
+    let imageUrl = '';
+    if(addFlowerState.imageFile){
+      try{
+        imageUrl = await uploadFlowerImage(addFlowerState.imageFile, id);
+      }catch(uploadErr){
+        console.error(uploadErr);
+        addFlowerState.error = 'Tải ảnh lên thất bại: ' + (uploadErr.message || String(uploadErr));
+        renderFlowerList();
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Lưu hoa mới';
+        return;
+      }
+    }
+
     let insertErr = null;
     for(let attempt = 0; attempt < 5; attempt++){
       const res = await supabaseClient
         .from('flowers')
-        .insert([{ ID_Hoa: id, Name: name, flower_color: tier, 'Trạng Thái': status, Image: '', 'List Acc': '' }]);
+        .insert([{ ID_Hoa: id, Name: name, flower_color: tier, 'Trạng Thái': status, Image: imageUrl, 'List Acc': '' }]);
       insertErr = res.error;
       if(!insertErr) break;
       // mã bị trùng (người khác vừa thêm hoa cùng lúc) — hỏi lại Supabase và thử id kế tiếp
@@ -568,7 +627,7 @@ function wireAddFlower(){
       m.baseFlowerIds = idsArr;
     }
 
-    const newFlower = { id, name, tier, status, listAccNames:[], image:'' };
+    const newFlower = { id, name, tier, status, listAccNames:[], image: imageUrl };
     state.flowers.push(newFlower);
     state.flowerById[id] = newFlower;
 
@@ -685,6 +744,8 @@ function renderFlowerDetail(id){
       name: f.name,
       tier: f.tier,
       status: f.status,
+      imageFile: null,
+      imagePreview: '',
       error: '',
     };
     renderFlowerDetail(id);
@@ -727,6 +788,11 @@ function flowerInfoEditShell(f){
               <option value="Chưa Có" ${s.status!=='Đã Có'?'selected':''}>Chưa Có</option>
             </select>
           </div>
+          <div class="select-field" style="flex:1 1 220px;">
+            <label>Ảnh hoa</label>
+            <input id="editFlowerImageFile" type="file" accept="image/*">
+            ${s.imagePreview || f.image ? `<img src="${esc(s.imagePreview || f.image)}" alt="preview" style="margin-top:6px;max-width:120px;max-height:120px;border-radius:8px;object-fit:cover;">` : ''}
+          </div>
         </div>
         ${s.error ? `<div class="empty-state" style="padding:10px 14px;"><span class="em-ico">⚠️</span>${esc(s.error)}</div>` : ''}
         <div class="edit-actions">
@@ -748,6 +814,15 @@ function wireFlowerInfoEdit(f){
   document.getElementById('editFlowerName').addEventListener('input', e => { s.name = e.target.value; });
   document.getElementById('editFlowerTier').addEventListener('change', e => { s.tier = e.target.value; });
   document.getElementById('editFlowerStatus').addEventListener('change', e => { s.status = e.target.value; });
+  document.getElementById('editFlowerImageFile').addEventListener('change', e => {
+    const file = e.target.files && e.target.files[0];
+    s.imageFile = file || null;
+    if(file){
+      const reader = new FileReader();
+      reader.onload = () => { s.imagePreview = reader.result; renderFlowerDetail(f.id); };
+      reader.readAsDataURL(file);
+    }
+  });
 
   document.getElementById('btnSaveFlowerInfo').addEventListener('click', async () => {
     const name = document.getElementById('editFlowerName').value.trim();
@@ -764,11 +839,26 @@ function wireFlowerInfoEdit(f){
     saveBtn.disabled = true;
     saveBtn.textContent = 'Đang lưu…';
 
+    // nếu người dùng chọn ảnh mới, upload lên Supabase Storage trước để lấy public URL
+    let imageUrl = f.image;
+    if(s.imageFile){
+      try{
+        imageUrl = await uploadFlowerImage(s.imageFile, f.id);
+      }catch(uploadErr){
+        console.error(uploadErr);
+        s.error = 'Tải ảnh lên thất bại: ' + (uploadErr.message || String(uploadErr));
+        renderFlowerDetail(f.id);
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Lưu thay đổi';
+        return;
+      }
+    }
+
     let error;
     try{
       const res = await supabaseClient
         .from('flowers')
-        .update({ Name: name, flower_color: tier, 'Trạng Thái': status })
+        .update({ Name: name, flower_color: tier, 'Trạng Thái': status, Image: imageUrl })
         .eq('ID_Hoa', f.id);
       error = res.error;
     }catch(networkErr){
@@ -788,6 +878,7 @@ function wireFlowerInfoEdit(f){
     f.name = name;
     f.tier = tier;
     f.status = status;
+    f.image = imageUrl;
 
     editFlowerInfoState = null;
     renderFlowerDetail(f.id);
