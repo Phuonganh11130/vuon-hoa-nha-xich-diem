@@ -252,6 +252,101 @@ function currentRoute(){
   return parts;
 }
 
+/* Gắn nút "X" cho 1 ô tìm kiếm: bấm vào là xóa sạch nội dung (không phải xóa từng ký tự),
+   focus lại vào ô, rồi gọi onChange('') để cập nhật filter + vẽ lại danh sách.
+   Nút chỉ hiện khi ô đang có nội dung. */
+function wireSearchClear(inputId, clearBtnId, onChange){
+  const input = document.getElementById(inputId);
+  const clearBtn = document.getElementById(clearBtnId);
+  if(!input || !clearBtn) return;
+
+  const syncClearVisible = () => {
+    clearBtn.style.display = input.value ? 'flex' : 'none';
+  };
+
+  syncClearVisible();
+
+  input.addEventListener('input', e => {
+    onChange(e.target.value);
+    syncClearVisible();
+  });
+
+  clearBtn.addEventListener('click', () => {
+    input.value = '';
+    onChange('');
+    syncClearVisible();
+    input.focus();
+  });
+}
+
+/* Chèn CSS cho nút "X" trong ô tìm kiếm và cho việc ghim (sticky) thanh filter/toolbar
+   khi cuộn trang. style.css gốc chưa có 2 phần này nên bổ sung trực tiếp ở đây,
+   dùng lại đúng các biến màu (--paper-edge, --ink-soft, --rose-light, --rose-deep)
+   đã khai báo trong style.css để đồng bộ giao diện. */
+(function injectStickyAndClearStyles(){
+  const style = document.createElement('style');
+  style.textContent = `
+    /* .search-box vốn đã là flex (icon - input - ...), nên nút X chỉ cần thêm
+       vào làm phần tử flex cuối cùng, không cần position absolute. */
+    .search-clear{
+      display: none;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: var(--paper-edge);
+      color: var(--ink-soft);
+      font-size: 11px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .search-clear:hover{ background: var(--rose-light); color: var(--rose-deep); }
+
+    /* Ghim thanh filter (.toolbar) VÀ hàng chip màu hoa (.tier-chips) lại,
+       xếp chồng đúng thứ tự ngay dưới .topbar (vốn đã sticky top:0) khi cuộn
+       xuống các thẻ hoa/thành viên. Chiều cao từng thanh được đo bằng JS và
+       lưu vào biến --topbar-h / --tierchips-h vì chúng co giãn theo màn hình
+       (mobile ẩn .tabs, tier-chips có thể xuống dòng...). */
+    .tier-chips{
+      position: sticky;
+      top: var(--topbar-h, 64px);
+      z-index: 25;
+      background: linear-gradient(180deg, rgba(251,246,236,0.96), rgba(251,246,236,0.86));
+      backdrop-filter: blur(10px);
+      padding: 10px 4px;
+      margin: 0 0 14px;
+      border-radius: 14px;
+    }
+    .toolbar{
+      position: sticky;
+      top: calc(var(--topbar-h, 64px) + var(--tierchips-h, 0px));
+      z-index: 20; /* thấp hơn .tier-chips và .topbar để không đè lên nhau */
+    }
+  `;
+  document.head.appendChild(style);
+
+  /* Đo chiều cao thực tế của .topbar và #tierChips (nếu có ở trang hiện tại)
+     rồi lưu vào biến CSS để .tier-chips / .toolbar luôn dán sát đúng vị trí,
+     không đè lên nhau và không hở khoảng trống. Cần gọi lại mỗi khi #app được
+     vẽ lại (đổi trang) vì #tierChips chỉ tồn tại ở trang Danh Sách Hoa. */
+  function syncStickyOffsets(){
+    const topbar = document.querySelector('.topbar');
+    if(topbar) document.documentElement.style.setProperty('--topbar-h', topbar.offsetHeight + 'px');
+
+    const tierChips = document.getElementById('tierChips');
+    // +14 để bù margin-bottom của .tier-chips (offsetHeight không tính margin)
+    document.documentElement.style.setProperty('--tierchips-h', tierChips ? (tierChips.offsetHeight + 14) + 'px' : '0px');
+  }
+  window.syncStickyOffsets = syncStickyOffsets; // để các hàm render gọi lại sau khi vẽ #app
+  window.addEventListener('DOMContentLoaded', syncStickyOffsets);
+  window.addEventListener('load', syncStickyOffsets);
+  window.addEventListener('resize', syncStickyOffsets);
+})();
+
 function navActive(routeKey){
   document.querySelectorAll('[data-route]').forEach(a=>{
     a.classList.toggle('active', a.dataset.route === routeKey);
@@ -290,7 +385,7 @@ async function render(){
 }
 
 /* ---------------- Flower list page ---------------- */
-let flowerFilters = { q:'', tier:'', status:'', quest:false, sort:'id-asc' };
+let flowerFilters = { q:'', tier:'', quest:false, sort:'id-asc' };
 let addFlowerState = null; // { name, tier, status, search:'', selected:Set<memberKey>, error:'' }
 
 function renderFlowerList(){
@@ -308,19 +403,14 @@ function renderFlowerList(){
     <div class="tier-chips" id="tierChips">
       ${chipHTML('', 'Tất cả', '#e6a58f')}
       ${TIER_ORDER.map(t => chipHTML(t, t, tierColor(t))).join('')}
+      <div class="result-count" id="resultCount"></div>
+      <button class="btn-export" id="btnAddFlower" title="Thêm một đóa hoa mới vào danh sách">➕ Thêm hoa mới</button>
     </div>
     <div class="toolbar">
       <div class="search-box">
         <span>🔎</span>
         <input id="fSearch" type="text" placeholder="Tìm theo tên hoa, tên tài khoản" value="${esc(flowerFilters.q)}">
-      </div>
-      <div class="select-field">
-        <label>Trạng thái</label>
-        <select id="fStatus">
-          <option value="">Tất cả</option>
-          <option value="yes">Đã có</option>
-          <option value="no">Chưa có</option>
-        </select>
+        <button type="button" class="search-clear" id="fSearchClear" title="Xóa nội dung tìm kiếm">✕</button>
       </div>
       <div class="select-field">
         <label>Nhiệm vụ</label>
@@ -339,19 +429,15 @@ function renderFlowerList(){
           <option value="owners-asc">Ít chủ sở hữu nhất</option>
         </select>
       </div>
-      <div class="result-count" id="resultCount"></div>
-      <button class="btn-export" id="btnAddFlower" title="Thêm một đóa hoa mới vào danh sách">➕ Thêm hoa mới</button>
     </div>
     <div class="grid" id="flowerGrid"></div>
   `;
 
   document.getElementById('fSearch').value = flowerFilters.q;
-  document.getElementById('fStatus').value = flowerFilters.status;
   document.getElementById('fQuest').checked = flowerFilters.quest;
   document.getElementById('fSort').value = flowerFilters.sort;
 
-  document.getElementById('fSearch').addEventListener('input', e => { flowerFilters.q = e.target.value; paintFlowerGrid(); });
-  document.getElementById('fStatus').addEventListener('change', e => { flowerFilters.status = e.target.value; paintFlowerGrid(); });
+  wireSearchClear('fSearch', 'fSearchClear', v => { flowerFilters.q = v; paintFlowerGrid(); });
   document.getElementById('fQuest').addEventListener('change', e => { flowerFilters.quest = e.target.checked; paintFlowerGrid(); });
   document.getElementById('fSort').addEventListener('change', e => { flowerFilters.sort = e.target.value; paintFlowerGrid(); });
   document.getElementById('tierChips').addEventListener('click', e => {
@@ -370,6 +456,7 @@ function renderFlowerList(){
 
   syncChipActive();
   paintFlowerGrid();
+  if(window.syncStickyOffsets) window.syncStickyOffsets();
 }
 
 function chipHTML(tierVal, label, color){
@@ -403,11 +490,6 @@ function paintFlowerGrid(){
   if(flowerFilters.tier){
     list = list.filter(f => f.tier === flowerFilters.tier);
   }
-  if(flowerFilters.status === 'yes'){
-    list = list.filter(f => f.status === 'Đã Có');
-  } else if(flowerFilters.status === 'no'){
-    list = list.filter(f => f.status !== 'Đã Có');
-  }
   if(flowerFilters.quest){
     list = list.filter(f => state.questFlowerIds.has(f.id));
   }
@@ -440,7 +522,6 @@ function paintFlowerGrid(){
           <span class="fc-status" title="${f.status==='Đã Có' ? 'Đã có trong vườn':'Chưa có'}">${f.status==='Đã Có' ? '✅' : '🌱'}</span>
         </div>
         <div class="fc-top">
-          <span class="fc-id">${esc(f.id)}</span>
           <span class="fc-name">${esc(f.name)}</span>
         </div>
       </a>
@@ -905,6 +986,7 @@ function renderMemberList(){
       <div class="search-box">
         <span>🔎</span>
         <input id="mSearch" type="text" placeholder="Tìm theo tên trong game hoặc Zalo" value="${esc(memberFilters.q)}">
+        <button type="button" class="search-clear" id="mSearchClear" title="Xóa nội dung tìm kiếm">✕</button>
       </div>
       <div class="select-field">
         <label>Sắp xếp</label>
@@ -923,7 +1005,7 @@ function renderMemberList(){
   `;
   document.getElementById('mSearch').value = memberFilters.q;
   document.getElementById('mSort').value = memberFilters.sort;
-  document.getElementById('mSearch').addEventListener('input', e => { memberFilters.q = e.target.value; paintMemberGrid(); });
+  wireSearchClear('mSearch', 'mSearchClear', v => { memberFilters.q = v; paintMemberGrid(); });
   document.getElementById('mSort').addEventListener('change', e => { memberFilters.sort = e.target.value; paintMemberGrid(); });
   document.getElementById('btnExportCSV').addEventListener('click', exportMembersCSV);
   document.getElementById('btnAddMember').addEventListener('click', async () => {
@@ -933,6 +1015,7 @@ function renderMemberList(){
     if(addMemberState) renderMemberList(); // vẫn đang ở form thêm thành viên thì cập nhật lại ID hiển thị
   });
   paintMemberGrid();
+  if(window.syncStickyOffsets) window.syncStickyOffsets();
 }
 
 /* ---------------- Add new member ---------------- */
