@@ -150,7 +150,7 @@ button{font-family:inherit;}
   background:var(--gold-light); padding:6px 14px; border-radius:999px; white-space:nowrap;
 }
 
-.tier-chips{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:20px;}
+.tier-chips{display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:20px;}
 .tier-chip{
   border:1.5px solid var(--paper-edge); background:var(--paper); color:var(--ink-soft);
   font-weight:700; font-size:.8rem; padding:7px 15px; border-radius:999px; cursor:pointer;
@@ -433,6 +433,42 @@ button{font-family:inherit;}
 @media (max-width:420px){
   .grid{grid-template-columns:repeat(auto-fill, minmax(160px,1fr));}
   .fc-media{height:110px; font-size:2rem;}
+}
+
+/* ===================== Khung tra cứu gọn trên mobile ===================== */
+/* Không ẩn/giấu bớt bộ lọc nào cả — vẫn hiển thị đầy đủ tier-chips + toolbar,
+   chỉ thu nhỏ kích thước từng phần (padding, font-size, chiều rộng ô search,
+   khoảng cách...) để chúng gọn lại và xếp vừa vào ít hàng hơn, thay vì chiếm
+   quá nhiều chiều cao màn hình khi bị ghim (sticky) dưới .topbar. */
+@media (max-width:760px){
+  .tier-chips{
+    padding:6px 4px;
+    gap:6px;
+    margin:0 0 10px;
+  }
+  .tier-chip{padding:5px 11px; font-size:.72rem; gap:4px;}
+  .tier-chip .dot{width:7px; height:7px;}
+
+  .toolbar{
+    padding:10px 12px;
+    gap:8px;
+    margin-bottom:12px;
+  }
+
+  /* Ô tìm kiếm không cần chiếm gần hết chiều rộng màn hình nữa */
+  .search-box{flex:1 1 100%; padding:6px 12px;}
+  .search-box input{font-size:.85rem;}
+
+  /* Ô chọn còn lại (Nhiệm vụ/Sắp xếp) xếp cạnh nhau, mỗi ô chỉ chiếm
+     vừa đủ chỗ thay vì kéo dài hết hàng */
+  .select-field{flex:0 1 auto;}
+  .select-field label{font-size:.6rem;}
+  .select-field select,
+  .select-field input[type=text]{padding:6px 10px; font-size:.78rem;}
+
+  .result-count{flex:0 0 auto; padding:5px 11px; font-size:.75rem;}
+  /* .btn-export không còn nằm trong .toolbar nữa (đã chuyển lên .tier-chips) */
+  .btn-export{padding:8px 14px; font-size:.8rem;}
 }
 
 /* skeleton loading */
