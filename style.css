@@ -457,14 +457,16 @@ button{font-family:inherit;}
 
   /* Ô tìm kiếm không cần chiếm gần hết chiều rộng màn hình nữa */
   .search-box{flex:1 1 100%; padding:6px 12px;}
-  .search-box input{font-size:.85rem;}
+  /* font-size giữ tối thiểu 16px để iOS Safari không tự động zoom khi focus vào input */
+  .search-box input{font-size:16px;}
 
   /* Ô chọn còn lại (Nhiệm vụ/Sắp xếp) xếp cạnh nhau, mỗi ô chỉ chiếm
      vừa đủ chỗ thay vì kéo dài hết hàng */
   .select-field{flex:0 1 auto;}
   .select-field label{font-size:.6rem;}
+  /* font-size giữ tối thiểu 16px để tránh bị phóng to màn hình khi focus (iOS Safari) */
   .select-field select,
-  .select-field input[type=text]{padding:6px 10px; font-size:.78rem;}
+  .select-field input[type=text]{padding:6px 10px; font-size:16px;}
 
   .result-count{flex:0 0 auto; padding:5px 11px; font-size:.75rem;}
   /* .btn-export không còn nằm trong .toolbar nữa (đã chuyển lên .tier-chips) */
